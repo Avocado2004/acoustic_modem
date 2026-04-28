@@ -1,0 +1,113 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+ENV/
+env/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.Thumbs.db
+.roo/
+
+# Audio and media files
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.ogg
+
+# Image files (generated)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+
+# Generated/temporary files
+*.log
+*.json
+*.npy
+*.txt
+*.txt.bak
+modulation_log.txt
+ofdm_modulation_log.txt
+found_preamble_peaks.json
+*.mdat
+*.fcp
+*.aep
+*.dcover
+*.rtf
+
+# Build artifacts
+OFDMModem.spec
+Gui.spec
+dist/
+build/
+*.o
+*.a
+
+# Backup files
+*_copy*
+*_копия*
+"Без названия*"
+*~
+*.bak
+
+# Test outputs
+test_*.wav
+rx_constellation*
+rx_rx_*
+transmission-*
+
+# venv and vendor
+venv/
+vendor/
+
+# PyInstaller
+*.spec
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Misc
+plans/
+.env
+.env.local
+secret.wav
