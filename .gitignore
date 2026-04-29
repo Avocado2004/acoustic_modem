@@ -111,3 +111,6 @@ plans/
 .env
 .env.local
 secret.wav
+.buildozer
+.buildozer/
+.buildozer/

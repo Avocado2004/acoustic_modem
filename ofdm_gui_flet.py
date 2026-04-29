@@ -12,6 +12,7 @@ import numpy as np
 import flet as ft
 
 from audio_backend import play_audio, stop_audio, is_playing
+from wav_utils import read as wav_read, write as wav_write
 
 _modem = None
 _import_err = None
@@ -46,7 +47,7 @@ class GuiLogger:
         if self._buf:
             self._append_line(self._buf)
             self._buf = ''
-
+    
     def _append_line(self, line):
         self.diag_field.value = (self.diag_field.value or '') + line
         self.page.update()
@@ -214,6 +215,17 @@ class OfdmApp:
         self._save_source_path = None
         self.selected_file_bytes = None
         self.selected_filename = None
+
+        # Initialize FilePickers for different actions
+        self.file_picker_pick = ft.FilePicker()
+        self.file_picker_pick.on_result = self._on_file_picked
+        self.page.overlay.append(self.file_picker_pick)
+
+        self.file_picker_save = ft.FilePicker()
+        self.file_picker_save.on_result = self._on_file_picked
+        self.page.overlay.append(self.file_picker_save)
+        
+        self._file_action = None  # 'pick', 'save_wav', 'save_recv', 'load_wav'
 
         self._build_widgets()
         self._build_layout()
@@ -418,6 +430,7 @@ class OfdmApp:
         self.mode = 'File'
         self._update_mode_buttons()
         self._apply_mode()
+        self._on_select_file(e)
 
     def _update_mode_buttons(self):
         if self.mode == 'Text':
@@ -433,8 +446,6 @@ class OfdmApp:
             self.input_field.read_only = False
             self.input_field.hint_text = 'Enter text here (or select a file in File Mode)'
             self.btn_select_file.disabled = True
-            if self.selected_file:
-                self.input_field.value = ''
         else:
             self.input_field.read_only = True
             self.input_field.hint_text = 'Selected file will appear here'
@@ -482,102 +493,58 @@ class OfdmApp:
         else:
             self._append_diag(fmt_log_line('Modulation set to ' + self.modulation + ' (modem not loaded)'))
 
-    def _create_temp_file_picker(self):
-        file_picker = ft.FilePicker()
-        self.page.overlay.append(file_picker)
-        self.page.update()
-        return file_picker
-
-    def _on_select_file(self, e):
-        self._append_diag(fmt_log_line('Opening file picker...'))
-        fp = self._create_temp_file_picker()
-        try:
-            files = fp.pick_files(
-                'Select file',
-                file_type=ft.FilePickerFileType.ANY,
-                allow_multiple=False,
-            )
-            if not files:
+    def _on_file_picked(self, e):
+        action = self._file_action
+        self._file_action = None
+        
+        if action == 'pick' or action == 'load_wav':
+            if not e.files:
                 self._append_diag(fmt_log_line('File selection cancelled'))
                 return
-            file = files[0]
-            self.selected_file_bytes = None
-            self.selected_filename = getattr(file, 'name', None) or os.path.basename(file.path or '')
-            self.selected_file = file.path
-            if self.selected_file:
-                self.input_field.value = self.selected_file
-            elif getattr(file, 'bytes', None) is not None:
-                self.selected_file_bytes = file.bytes
-                self.input_field.value = self.selected_filename or '[file selected]'
-            else:
-                self.input_field.value = '[file selected]'
-            self._append_diag(fmt_log_line('Selected file: ' + str(self.selected_filename or self.selected_file)))
-            self.page.update()
-        except Exception as ex:
-            self._append_diag(fmt_log_line('File picker failed: ' + str(ex)))
-        finally:
-            if fp in self.page.overlay:
-                self.page.overlay.remove(fp)
-                self.page.update()
-
-    def _on_load_wav(self, e):
-        self._append_diag(fmt_log_line('Opening WAV file picker...'))
-        fp = self._create_temp_file_picker()
-        try:
-            files = fp.pick_files(
-                'Load WAV file with signal',
-                file_type=ft.FilePickerFileType.CUSTOM,
-                allowed_extensions=['wav'],
-                allow_multiple=False,
-                with_data=True,
-            )
-            if not files:
-                self._append_diag(fmt_log_line('WAV selection cancelled'))
-                return
-            file = files[0]
-            self.loaded_wav_path = file.path
-            try:
-                from scipy.io import wavfile
-                if self.loaded_wav_path:
-                    fs, data = wavfile.read(self.loaded_wav_path)
+            file = e.files[0]
+            if action == 'pick':
+                self.selected_file_bytes = None
+                self.selected_filename = getattr(file, 'name', None) or os.path.basename(file.path or '')
+                self.selected_file = file.path
+                if self.selected_file:
+                    self.input_field.value = self.selected_file
+                elif getattr(file, 'bytes', None) is not None:
+                    self.selected_file_bytes = file.bytes
+                    self.input_field.value = self.selected_filename or '[file selected]'
                 else:
-                    fs, data = wavfile.read(io.BytesIO(file.bytes))
-                if data.dtype != np.float64:
-                    if data.dtype == np.int16:
-                        data = data.astype(np.float64) / 32767.0
-                    elif data.dtype == np.int32:
-                        data = data.astype(np.float64) / 2147483647.0
+                    self.input_field.value = '[file selected]'
+                self._append_diag(fmt_log_line('Selected file: ' + str(self.selected_filename or self.selected_file)))
+                self.page.update()
+            else:  # load_wav
+                try:
+                    # Сначала пробуем прочитать из bytes, если они есть (независимо от платформы)
+                    if hasattr(file, 'bytes') and file.bytes is not None:
+                        fs, data = wav_read(io.BytesIO(file.bytes))
+                        self.loaded_wav_path = None
+                    elif file.path:
+                        fs, data = wav_read(file.path)
+                        self.loaded_wav_path = file.path
                     else:
-                        data = data.astype(np.float64)
-                if _modem is not None:
-                    _modem.rx = data
-                    _modem.rx_fs = fs
-                    self._append_diag(fmt_log_line('WAV loaded: ' + str(len(data)) + ' samples at ' + str(fs) + ' Hz'))
-                else:
-                    self._append_diag(fmt_log_line('WAV loaded but modem not available'))
+                        raise Exception("No file data available")
+                    if data.dtype != np.float64:
+                        if data.dtype == np.int16:
+                            data = data.astype(np.float64) / 32767.0
+                        elif data.dtype == np.int32:
+                            data = data.astype(np.float64) / 2147483647.0
+                        else:
+                            data = data.astype(np.float64)
+                    if _modem is not None:
+                        _modem.rx = data
+                        _modem.rx_fs = fs
+                        self._append_diag(fmt_log_line('WAV loaded: ' + str(len(data)) + ' samples at ' + str(fs) + ' Hz'))
+                    else:
+                        self._append_diag(fmt_log_line('WAV loaded but modem not available'))
+                except Exception as ex:
+                    self._append_diag(fmt_log_line('Failed to load WAV: ' + str(ex)))
                 self.page.update()
-            except Exception as ex:
-                self._append_diag(fmt_log_line('Failed to load WAV: ' + str(ex)))
-        except Exception as ex:
-            self._append_diag(fmt_log_line('WAV file picker failed: ' + str(ex)))
-        finally:
-            if fp in self.page.overlay:
-                self.page.overlay.remove(fp)
-                self.page.update()
-
-    def _on_save_wav(self, e):
-        if self.tx_audio is None:
-            self._append_diag(fmt_log_line('Save WAV: no audio (generate first)'))
-            return
-        fp = self._create_temp_file_picker()
-        try:
-            path = fp.save_file(
-                'Save WAV as',
-                file_name='ofdm_tx.wav',
-                file_type=ft.FilePickerFileType.CUSTOM,
-                allowed_extensions=['wav'],
-            )
-            if not path:
+            
+        elif action == 'save_wav':
+            if not e.path:
                 self._append_diag(fmt_log_line('Save cancelled'))
                 return
             try:
@@ -585,104 +552,101 @@ class OfdmApp:
                     fs = int(self.tx_info.get('fs', gattr(_modem, 'fs', 48000)))
                 else:
                     fs = int(gattr(_modem, 'fs', 48000))
-                from scipy.io import wavfile
                 max_abs = np.max(np.abs(self.tx_audio)) if self.tx_audio.size else 0.0
                 if max_abs == 0:
                     data_int16 = (self.tx_audio * 0).astype(np.int16)
                 else:
                     data_int16 = (self.tx_audio / max_abs * np.iinfo(np.int16).max).astype(np.int16)
-                wavfile.write(path, fs, data_int16)
-                self._append_diag(fmt_log_line('Saved WAV to ' + path))
+                wav_write(e.path, fs, data_int16)
+                self._append_diag(fmt_log_line('Saved WAV to ' + e.path))
             except Exception as ex:
                 self._append_diag(fmt_log_line('Save WAV failed: ' + str(ex)))
-        except Exception as ex:
-            self._append_diag(fmt_log_line('Save picker failed: ' + str(ex)))
-        finally:
-            if fp in self.page.overlay:
-                self.page.overlay.remove(fp)
-                self.page.update()
+                
+        elif action == 'save_recv':
+            if not e.path:
+                self._append_diag(fmt_log_line('Save cancelled'))
+                return
+            mode = self.mode
+            if mode == 'Text':
+                content = self.recv_field.value
+                try:
+                    with open(e.path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    self._append_diag(fmt_log_line('Saved received text to ' + e.path))
+                except Exception as ex:
+                    self._append_diag(fmt_log_line('Save failed: ' + str(ex)))
+            else:
+                if self.logger.last_rx_saved_path and os.path.exists(self.logger.last_rx_saved_path):
+                    try:
+                        shutil.copyfile(self.logger.last_rx_saved_path, e.path)
+                        self._append_diag(fmt_log_line('Copied received file to ' + e.path))
+                    except Exception as ex:
+                        self._append_diag(fmt_log_line('Save failed: ' + str(ex)))
+                else:
+                    content = self.recv_field.value
+                    try:
+                        with open(e.path, 'w', encoding='utf-8') as f:
+                            f.write(content)
+                        self._append_diag(fmt_log_line('Saved received text to ' + e.path))
+                    except Exception as ex:
+                        self._append_diag(fmt_log_line('Save failed: ' + str(ex)))
+
+    def _on_select_file(self, e):
+        self._append_diag(fmt_log_line('Opening file picker...'))
+        self._file_action = 'pick'
+        self.file_picker_pick.pick_files(
+            'Select file',
+            file_type=ft.FilePickerFileType.ANY,
+            allow_multiple=False,
+        )
+
+    def _on_load_wav(self, e):
+        self._append_diag(fmt_log_line('Opening WAV file picker...'))
+        self._file_action = 'load_wav'
+        self.file_picker_pick.pick_files(
+            'Load WAV file with signal',
+            file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=['wav'],
+            allow_multiple=False,
+            with_data=True,
+        )
+
+    def _on_save_wav(self, e):
+        if self.tx_audio is None:
+            self._append_diag(fmt_log_line('Save WAV: no audio (generate first)'))
+            return
+        self._file_action = 'save_wav'
+        self.file_picker_save.save_file(
+            'Save WAV as',
+            file_name='ofdm_tx.wav',
+            file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=['wav'],
+        )
 
     def _on_save_received(self, e):
+        self._file_action = 'save_recv'
         mode = self.mode
         if mode == 'Text':
-            content = self.recv_field.value
-            if not content:
-                self._append_diag(fmt_log_line('Save: Nothing received yet'))
-                return
-            fp = self._create_temp_file_picker()
-            try:
-                path = fp.save_file(
-                    'Save received text as',
+            self.file_picker_save.save_file(
+                'Save received text as',
+                file_name='received.txt',
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=['txt'],
+            )
+        else:
+            if self.logger.last_rx_saved_path and os.path.exists(self.logger.last_rx_saved_path):
+                self.file_picker_save.save_file(
+                    'Save received file as',
+                    file_name=os.path.basename(self.logger.last_rx_saved_path),
+                    file_type=ft.FilePickerFileType.ANY,
+                )
+            else:
+                self.file_picker_save.save_file(
+                    'Save received as',
                     file_name='received.txt',
                     file_type=ft.FilePickerFileType.CUSTOM,
                     allowed_extensions=['txt'],
                 )
-                if not path:
-                    self._append_diag(fmt_log_line('Save cancelled'))
-                    return
-                try:
-                    with open(path, 'w', encoding='utf-8') as f:
-                        f.write(content)
-                    self._append_diag(fmt_log_line('Saved received text to ' + path))
-                except Exception as ex:
-                    self._append_diag(fmt_log_line('Save failed: ' + str(ex)))
-            except Exception as ex:
-                self._append_diag(fmt_log_line('Save picker failed: ' + str(ex)))
-            finally:
-                if fp in self.page.overlay:
-                    self.page.overlay.remove(fp)
-                    self.page.update()
-        else:
-            if self.logger.last_rx_saved_path and os.path.exists(self.logger.last_rx_saved_path):
-                fp = self._create_temp_file_picker()
-                try:
-                    path = fp.save_file(
-                        'Save received file as',
-                        file_name=os.path.basename(self.logger.last_rx_saved_path),
-                        file_type=ft.FilePickerFileType.ANY,
-                    )
-                    if not path:
-                        self._append_diag(fmt_log_line('Save cancelled'))
-                        return
-                    try:
-                        shutil.copyfile(self.logger.last_rx_saved_path, path)
-                        self._append_diag(fmt_log_line('Copied received file to ' + path))
-                    except Exception as ex:
-                        self._append_diag(fmt_log_line('Save failed: ' + str(ex)))
-                except Exception as ex:
-                    self._append_diag(fmt_log_line('Save picker failed: ' + str(ex)))
-                finally:
-                    if fp in self.page.overlay:
-                        self.page.overlay.remove(fp)
-                        self.page.update()
-            else:
-                content = self.recv_field.value
-                if not content:
-                    self._append_diag(fmt_log_line('Save: Nothing received yet'))
-                    return
-                fp = self._create_temp_file_picker()
-                try:
-                    path = fp.save_file(
-                        'Save received as',
-                        file_name='received.txt',
-                        file_type=ft.FilePickerFileType.CUSTOM,
-                        allowed_extensions=['txt'],
-                    )
-                    if not path:
-                        self._append_diag(fmt_log_line('Save cancelled'))
-                        return
-                    try:
-                        with open(path, 'w', encoding='utf-8') as f:
-                            f.write(content)
-                        self._append_diag(fmt_log_line('Saved received text to ' + path))
-                    except Exception as ex:
-                        self._append_diag(fmt_log_line('Save failed: ' + str(ex)))
-                except Exception as ex:
-                    self._append_diag(fmt_log_line('Save picker failed: ' + str(ex)))
-                finally:
-                    if fp in self.page.overlay:
-                        self.page.overlay.remove(fp)
-                        self.page.update()
 
     def _on_generate(self, e):
         mode = self.mode

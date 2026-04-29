@@ -27,17 +27,31 @@ import math
 import struct
 import zlib
 import numpy as np
-from scipy.signal import fftconvolve, medfilt, correlate, find_peaks
-from scipy.io import wavfile
-import matplotlib
-# Use non-GUI backend to avoid creating windows or requiring a display
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import sounddevice as sd
+from signal_utils import fftconvolve, medfilt, correlate, find_peaks
+from wav_utils import wavfile
+from audio_backend import get_audio
 from reedsolo import RSCodec
 import threading
 import time
 from collections import deque
+
+# Conditional imports for plotting (not available on mobile platforms)
+try:
+    import matplotlib
+    # Use non-GUI backend to avoid creating windows or requiring a display
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    PLOTTING_AVAILABLE = True
+except ImportError:
+    plt = None
+    PLOTTING_AVAILABLE = False
+    print("[WARN] matplotlib not available, plotting disabled")
+
+try:
+    from plot_utils import plot_constellation
+except ImportError:
+    plot_constellation = None
+    print("[WARN] plot_utils not available, constellation plotting disabled")
 
 # --- Рабочая директория ---
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -351,7 +365,11 @@ def make_training_blocks(n_blocks=HABR_SAMPLE_BLOCKS, seed=HABR_SEED):
   blocks = []
   for _ in range(n_blocks):
     bits = rng.randint(0, 2, Nsub * 2)
-    syms = qpsk_map(bits)
+    # Используем текущую модуляцию для тренировочных блоков
+    if MODULATION == "BPSK":
+        syms = bpsk_map(bits[:Nsub])  # BPSK: 1 бит на поднесущую
+    else:
+        syms = qpsk_map(bits)
     blocks.append(syms)
   return np.array(blocks)
 
@@ -527,6 +545,7 @@ def parse_header(header64: bytes):
             'version': version,
             'tx_type': tx_type,
             'mode': mode,
+            'modulation': modulation,
             'data_len': data_len,
             'name_len': name_len,
             'filename': filename,
@@ -627,26 +646,6 @@ def simulate_packet_positions(total_data_len_bytes, filename_bytes, mode_is_text
 
     return positions
 
-def plot_constellation(symb, title="Constellation"):
-  try:
-    plt.figure(figsize=(5,5))
-    plt.plot(np.real(symb), np.imag(symb), 'o', markersize=2, alpha=0.6)
-    plt.axhline(0, color='grey', linewidth=0.5)
-    plt.axvline(0, color='grey', linewidth=0.5)
-    plt.title(title)
-    plt.xlabel("In-phase")
-    plt.ylabel("Quadrature")
-    plt.grid(True)
-    plt.axis('equal')
-    # save constellation to file instead of showing interactive window
-    try:
-      plt.savefig("constellation.png", dpi=150, bbox_inches="tight")
-    except Exception:
-      pass
-    plt.close()
-  except Exception as e:
-    print("[PLOT] cannot show constellation:", e)
-
 # soft clipping utilities
 TARGET_CREST_DB = 6
 CREST_TOLERANCE_DB = 0.1
@@ -712,30 +711,36 @@ def _try_alternate_demaps_and_rs(rx_syms_pkt, n_cw, packet_idx, bytes_before_pac
         lambda x: x * -1j,
     ]
     best = (None, 0)
-    for tr in transforms:
-        try:
-            rx_t = tr(rx_syms_pkt)
-        except Exception:
-            continue
-        bits_t = qpsk_demap(rx_t)
-        cw_bits = RS_CW_BITS
-        n_cw_t = len(bits_t) // cw_bits
-        rs_ok_t = 0
-        decoded_blocks_t = []
-        for ci in range(min(n_cw_t, n_cw)):
-            bstart = ci * cw_bits
-            bbits = bits_t[bstart:bstart+cw_bits]
-            if len(bbits) < cw_bits:
-                bbits = np.concatenate((bbits, np.zeros(cw_bits - len(bbits), dtype=int)))
-            bts = bits_to_bytes(bbits)
+    # Пробуем оба типа демаппинга: QPSK и BPSK
+    for mod in ["QPSK", "BPSK"]:
+        for tr in transforms:
             try:
-                msg = rs.decode(bts)[0]
-                rs_ok_t += 1
+                rx_t = tr(rx_syms_pkt)
             except Exception:
-                msg = b'\x00' * RS_DATA_BYTES
-            decoded_blocks_t.append(msg)
-        if rs_ok_t > best[1]:
-            best = (b"".join(decoded_blocks_t), rs_ok_t)
+                continue
+            # Используем соответствующий демаппинг
+            if mod == "BPSK":
+                bits_t = bpsk_demap(rx_t)
+            else:
+                bits_t = qpsk_demap(rx_t)
+            cw_bits = RS_CW_BITS
+            n_cw_t = len(bits_t) // cw_bits
+            rs_ok_t = 0
+            decoded_blocks_t = []
+            for ci in range(min(n_cw_t, n_cw)):
+                bstart = ci * cw_bits
+                bbits = bits_t[bstart:bstart+cw_bits]
+                if len(bbits) < cw_bits:
+                    bbits = np.concatenate((bbits, np.zeros(cw_bits - len(bbits), dtype=int)))
+                bts = bits_to_bytes(bbits)
+                try:
+                    msg = rs.decode(bts)[0]
+                    rs_ok_t += 1
+                except Exception:
+                    msg = b'\x00' * RS_DATA_BYTES
+                decoded_blocks_t.append(msg)
+            if rs_ok_t > best[1]:
+                best = (b"".join(decoded_blocks_t), rs_ok_t)
     return best
 
 def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, bytes_before_packet=0, expected_total=0):
@@ -865,11 +870,68 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
         else:
             rx_syms_pkt = rx_subc_pkt
 
-        # Use appropriate modulation demapping
-        if MODULATION == "BPSK":
-            bits_pkt = bpsk_demap(rx_syms_pkt)
+        # Динамическое определение модуляции из заголовка
+        # Пробуем QPSK по умолчанию
+        bits_pkt = qpsk_demap(rx_syms_pkt)
+        
+        # Для первого пакета пытаемся определить модуляцию из заголовка
+        if packet_idx == 0:
+            cw_bits = RS_CW_BITS
+            n_cw = len(bits_pkt) // cw_bits
+            detected_mod = None
+            
+            # Пробуем QPSK демаппинг
+            if n_cw > 0:
+                bstart = 0
+                bbits = bits_pkt[bstart:bstart+cw_bits]
+                if len(bbits) < cw_bits:
+                    bbits = np.concatenate((bbits, np.zeros(cw_bits - len(bbits), dtype=int)))
+                bts = bits_to_bytes(bbits)
+                try:
+                    msg = rs.decode(bts)[0]
+                    if len(msg) > 0 and (msg[0] & 0xF0) != 0:
+                        # Валидный заголовок, проверяем биты модуляции
+                        mod_bits = (msg[0] >> 2) & 0x03
+                        detected_mod = "BPSK" if mod_bits == 0b01 else "QPSK"
+                except Exception:
+                    pass
+            
+            # Если QPSK не сработал, пробуем BPSK
+            if detected_mod is None:
+                bits_pkt_bpsk = bpsk_demap(rx_syms_pkt)
+                n_cw_bpsk = len(bits_pkt_bpsk) // cw_bits
+                if n_cw_bpsk > 0:
+                    bbits = bits_pkt_bpsk[:cw_bits]
+                    if len(bbits) < cw_bits:
+                        bbits = np.concatenate((bbits, np.zeros(cw_bits - len(bbits), dtype=int)))
+                    bts = bits_to_bytes(bbits)
+                    try:
+                        msg = rs.decode(bts)[0]
+                        if len(msg) > 0 and (msg[0] & 0xF0) != 0:
+                            mod_bits = (msg[0] >> 2) & 0x03
+                            detected_mod = "BPSK" if mod_bits == 0b01 else "QPSK"
+                            if detected_mod == "BPSK":
+                                bits_pkt = bits_pkt_bpsk
+                    except Exception:
+                        pass
+            
+            # Обновляем глобальные переменные если модуляция определена
+            if detected_mod is not None:
+                global MODULATION, BITS_PER_SYMBOL, BITS_PER_OFDM_SYMBOL
+                if MODULATION != detected_mod:
+                    MODULATION = detected_mod
+                    if MODULATION == "BPSK":
+                        BITS_PER_SYMBOL = 1
+                    else:
+                        BITS_PER_SYMBOL = 2
+                    BITS_PER_OFDM_SYMBOL = Nsub * BITS_PER_SYMBOL
+                    print(f"[RX] Обнаружена модуляция: {MODULATION}, BITS_PER_SYMBOL={BITS_PER_SYMBOL}")
         else:
-            bits_pkt = qpsk_demap(rx_syms_pkt)
+            # Для последующих пакетов используем текущую настройку MODULATION
+            if MODULATION == "BPSK":
+                bits_pkt = bpsk_demap(rx_syms_pkt)
+            else:
+                bits_pkt = qpsk_demap(rx_syms_pkt)
         cw_bits = RS_CW_BITS
         n_cw = len(bits_pkt) // cw_bits
         rs_ok = 0
@@ -1049,6 +1111,8 @@ def live_receive_and_process():
     BUFFER_LOCK = threading.Lock()
     ring = deque()
     total_samples_in_buffer = 0
+    # Для отслеживания модуляции при live приеме
+    global MODULATION, BITS_PER_SYMBOL, BITS_PER_OFDM_SYMBOL
 
     def audio_callback(indata, frames, time_info, status):
         nonlocal total_samples_in_buffer
@@ -1059,8 +1123,8 @@ def live_receive_and_process():
             ring.append(s)
             total_samples_in_buffer += s.size
 
-    stream = sd.InputStream(samplerate=fs, channels=RECORD_CHANNELS, blocksize=CHUNK, callback=audio_callback)
-    stream.start()
+    audio = get_audio()
+    audio.start_stream(audio_callback, samplerate=fs, channels=RECORD_CHANNELS, blocksize=CHUNK)
     print("[LIVE] microphone stream started, buffering...")
 
     def read_buffer_snapshot():
@@ -1161,8 +1225,7 @@ def live_receive_and_process():
                 print("[LIVE] failed to decode first packet from live buffer")
                 globals()['rx'] = globals_backup['rx']
                 globals()['abs_corr'] = globals_backup['abs_corr']
-                stream.stop()
-                stream.close()
+                audio.stop()
                 return
             header64 = pkt0_decoded[:64]
             try:
@@ -1170,8 +1233,7 @@ def live_receive_and_process():
             except Exception as e:
                 print("[LIVE] parse_header failed:", e)
                 try:
-                    stream.stop()
-                    stream.close()
+                    audio.stop()
                 except Exception:
                     pass
                 print("[LIVE] aborting receive due to invalid transmission header")
@@ -1189,8 +1251,7 @@ def live_receive_and_process():
             # sanity check: packet_blocks must be > 0
             if not isinstance(packet_blocks_from_hdr, int) or packet_blocks_from_hdr <= 0:
                 try:
-                    stream.stop()
-                    stream.close()
+                    audio.stop()
                 except Exception:
                     pass
                 print(f"[LIVE] invalid packet_blocks in header ({packet_blocks_from_hdr}), aborting receive")
@@ -1202,8 +1263,7 @@ def live_receive_and_process():
                                                              gap_samples=GAP_SAMPLES_DEFAULT)
             if len(positions_no_preroll) == 0:
                 print("[LIVE] simulate_packet_positions returned no positions")
-                stream.stop()
-                stream.close()
+                audio.stop()
                 return
 
             base_abs = first_sync_abs - positions_no_preroll[0]
@@ -1328,7 +1388,7 @@ def live_receive_and_process():
                     if 'rx_syms_list' in globals() and isinstance(globals()['rx_syms_list'], list) and len(globals()['rx_syms_list']) > 0:
                         M = 2048
                         concat_list = [r[:M] for r in globals()['rx_syms_list'] if isinstance(r, np.ndarray) and r.size > 0]
-                        if len(concat_list) > 0:
+                        if len(concat_list) > 0 and PLOTTING_AVAILABLE:
                             concat = np.concatenate(concat_list)
                             plt.figure(figsize=(5,5))
                             plt.plot(np.real(concat), np.imag(concat), 'o', markersize=2, alpha=0.4)
@@ -1342,18 +1402,19 @@ def live_receive_and_process():
                             plt.close()
                             figs_shown += 1
                     else:
-                        plt.figure(figsize=(8,3))
-                        tvec = np.arange(len(plot_slice)) / float(fs)
-                        plt.plot(tvec, plot_slice)
-                        plt.title("Time-domain slice (post-sync)")
-                        plt.xlabel("Time (s)"); plt.ylabel("Amplitude"); plt.grid(True)
-                        figs_shown += 1
+                        if PLOTTING_AVAILABLE:
+                            plt.figure(figsize=(8,3))
+                            tvec = np.arange(len(plot_slice)) / float(fs)
+                            plt.plot(tvec, plot_slice)
+                            plt.title("Time-domain slice (post-sync)")
+                            plt.xlabel("Time (s)"); plt.ylabel("Amplitude"); plt.grid(True)
+                            figs_shown += 1
                 else:
                     print("[PLOT] no focused slice available, skipping plots")
 
                 if 'Hk_smooth_list' in globals() and isinstance(globals()['Hk_smooth_list'], list) and len(globals()['Hk_smooth_list']) > 0:
                     Hlist = [h for h in globals()['Hk_smooth_list'] if isinstance(h, np.ndarray) and h.size == len(subc_inds)]
-                    if len(Hlist) > 0:
+                    if len(Hlist) > 0 and PLOTTING_AVAILABLE:
                         Hstack = np.vstack(Hlist)
                         Hmedian = np.median(Hstack, axis=0)
                         freqs = subc_inds * fs / float(Nfft)
@@ -1373,7 +1434,7 @@ def live_receive_and_process():
                 else:
                     print("[PLOT] no Hk_smooth available, skipping equalizer gain")
 
-                if figs_shown > 0:
+                if figs_shown > 0 and PLOTTING_AVAILABLE:
                     # figures already saved to files; close any open figures and do not block
                     try:
                         plt.close('all')
@@ -1395,9 +1456,8 @@ def live_receive_and_process():
         traceback.print_exc()
     finally:
         try:
-            if stream.active:
-                stream.stop()
-            stream.close()
+            if audio.is_active():
+                audio.stop()
         except Exception:
             pass
         print("[LIVE] microphone stream stopped")
@@ -1801,7 +1861,7 @@ if __name__ == "__main__":
             if 'rx_syms_list' in globals() and isinstance(globals()['rx_syms_list'], list) and len(globals()['rx_syms_list']) > 0:
                 M = 2048
                 concat_list = [r[:M] for r in globals()['rx_syms_list'] if isinstance(r, np.ndarray) and r.size > 0]
-                if len(concat_list) > 0:
+                if len(concat_list) > 0 and PLOTTING_AVAILABLE:
                     concat = np.concatenate(concat_list)
                     plt.figure(figsize=(5,5))
                     plt.plot(np.real(concat), np.imag(concat), 'o', markersize=2, alpha=0.4)
@@ -1815,23 +1875,24 @@ if __name__ == "__main__":
                     plt.close()
                     figs_shown += 1
             else:
-                plt.figure(figsize=(8,3))
-                tvec = np.arange(len(plot_slice)) / float(fs)
-                plt.plot(tvec, plot_slice)
-                plt.title("Time-domain slice (post-sync)")
-                plt.xlabel("Time (s)"); plt.ylabel("Amplitude"); plt.grid(True)
-                try:
-                    plt.savefig("time_slice.png", dpi=150, bbox_inches="tight")
-                except Exception:
-                    pass
-                plt.close()
-                figs_shown += 1
+                if PLOTTING_AVAILABLE:
+                    plt.figure(figsize=(8,3))
+                    tvec = np.arange(len(plot_slice)) / float(fs)
+                    plt.plot(tvec, plot_slice)
+                    plt.title("Time-domain slice (post-sync)")
+                    plt.xlabel("Time (s)"); plt.ylabel("Amplitude"); plt.grid(True)
+                    try:
+                        plt.savefig("time_slice.png", dpi=150, bbox_inches="tight")
+                    except Exception:
+                        pass
+                    plt.close()
+                    figs_shown += 1
         else:
             print("[PLOT] no focused slice available, skipping plots")
 
         if 'Hk_smooth_list' in globals() and isinstance(globals()['Hk_smooth_list'], list) and len(globals()['Hk_smooth_list']) > 0:
             Hlist = [h for h in globals()['Hk_smooth_list'] if isinstance(h, np.ndarray) and h.size == len(subc_inds)]
-            if len(Hlist) > 0:
+            if len(Hlist) > 0 and PLOTTING_AVAILABLE:
                 Hstack = np.vstack(Hlist)
                 Hmedian = np.median(Hstack, axis=0)
                 freqs = subc_inds * fs / float(Nfft)
@@ -1852,7 +1913,7 @@ if __name__ == "__main__":
         else:
             print("[PLOT] no Hk_smooth available, skipping equalizer gain")
 
-        if figs_shown > 0:
+        if figs_shown > 0 and PLOTTING_AVAILABLE:
                     # figures already saved to files; close any open figures and do not block
                     try:
                         plt.close('all')
