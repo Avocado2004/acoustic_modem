@@ -3,9 +3,15 @@
 Реализации основных функций scipy.signal через numpy и pure python.
 """
 
-from typing import Tuple, Optional, List, Union, Literal
+from typing import Tuple, Optional, List, Union, Literal, Sequence
 import numpy as np
-from numpy.typing import ArrayLike, NDArray
+try:
+    from numpy.typing import ArrayLike, NDArray
+except ImportError:
+    # For older numpy versions that don't have numpy.typing
+    # Define type aliases for compatibility
+    ArrayLike = Union[np.ndarray, Sequence[float], Sequence[int]]
+    NDArray = np.ndarray
 
 
 def fftconvolve(in1: ArrayLike, in2: ArrayLike, mode: str = 'full') -> NDArray[np.float64]:

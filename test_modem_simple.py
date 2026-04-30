@@ -1653,6 +1653,28 @@ if __name__ == "__main__":
     for i, pos in enumerate(packet_preamble_offsets_with_preroll):
       print(f"  packet {i}: preamble_sample_index={pos}")
 
+ 
+    # Play the generated signal
+    print(f"[TX] Preparing to play sound...")
+    print(f"[TX-DBG] Signal amplitude: max_abs={max_abs:.6f}, RMS={np.sqrt(np.mean(tx_clipped**2)):.6f}")
+    print(f"[TX-DBG] Signal duration: {len(tx_clipped)/fs:.3f} seconds")
+    
+    audio = get_audio()
+    if audio is not None:
+      print(f"[TX] Playing through audio backend: {audio.__class__.__name__}")
+      # Use float32 for playback
+      tx_float32 = tx_clipped.astype(np.float32)
+      # Normalize for playback (ensure in range [-1, 1])
+      max_val = np.max(np.abs(tx_float32))
+      if max_val > 0:
+        tx_float32 = tx_float32 / max_val
+      print(f"[TX-DBG] After normalization: max={np.max(np.abs(tx_float32)):.6f}")
+      audio.play(tx_float32, samplerate=fs)
+      print(f"[TX] Playback completed")
+    else:
+      print("[TX-ERR] Audio backend not available!")
+    
+ 
   else:
     src = input("Откуда демодулировать? (file/mic): ").strip().lower()
     if src == "file":

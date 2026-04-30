@@ -5,6 +5,7 @@ Supports macOS, Windows, and Linux.
 
 import numpy as np
 import sounddevice as sd
+import time
 
 
 class DesktopAudio:
@@ -16,7 +17,14 @@ class DesktopAudio:
     def __init__(self):
         self._stream = None
         self._play_stream = None
-        self._callbacks = []
+        self._callback = None
+
+    def _wrapped_callback(self, indata, frames, time_info, status):
+        """Internal callback wrapper that calls user callback."""
+        if status:
+            print(f"[DesktopAudio] Status: {status}")
+        if self._callback is not None:
+            self._callback(indata, frames, time_info, status)
 
     def start_stream(self, callback, samplerate=48000, channels=1, blocksize=1024):
         """
@@ -31,16 +39,13 @@ class DesktopAudio:
         if self._stream is not None:
             self.stop()
 
-        def wrapped_callback(indata, frames, time_info, status):
-            if status:
-                print(f"[DesktopAudio] Status: {status}")
-            callback(indata, frames, time_info, status)
+        self._callback = callback
 
         self._stream = sd.InputStream(
             samplerate=samplerate,
             channels=channels,
             blocksize=blocksize,
-            callback=wrapped_callback
+            callback=self._wrapped_callback
         )
         self._stream.start()
 
@@ -53,22 +58,71 @@ class DesktopAudio:
             samplerate: sample rate in Hz
         """
         if self._play_stream is not None:
-            self._play_stream.stop()
-            self._play_stream.close()
+            try:
+                self._play_stream.stop()
+                self._play_stream.close()
+            except Exception as e:
+                print(f"[DesktopAudio] Error stopping previous stream: {e}")
+            finally:
+                self._play_stream = None
 
-        # Ensure data is 1D or 2D with channels last
+        # Ensure data is 1D
         if data.ndim > 1:
             data = data[:, 0]
 
-        self._play_stream = sd.OutputStream(
-            samplerate=samplerate,
-            channels=1,
-            blocksize=1024
-        )
-        self._play_stream.start()
+        # Print debug information
+        print(f"[DesktopAudio] play() called with {len(data)} samples, samplerate={samplerate}")
+        print(f"[DesktopAudio] Data stats: min={np.min(data):.6f}, max={np.max(data):.6f}, "
+              f"RMS={np.sqrt(np.mean(data**2)):.6f}")
 
-        # Write data to stream
-        self._play_stream.write(data.astype(np.float32))
+        # Check available audio devices
+        try:
+            devices = sd.query_devices()
+            print(f"[DesktopAudio] Available devices:")
+            for idx, dev in enumerate(devices):
+                if dev['max_output_channels'] > 0:
+                    print(f"  {idx}: {dev['name']} (outputs: {dev['max_output_channels']})")
+        except Exception as e:
+            print(f"[DesktopAudio] Could not query audio devices: {e}")
+
+        try:
+            # Create output stream
+            self._play_stream = sd.OutputStream(
+                samplerate=samplerate,
+                channels=1,
+                blocksize=1024
+            )
+            self._play_stream.start()
+            print(f"[DesktopAudio] OutputStream started, writing {len(data)} samples...")
+
+            # Write data to stream
+            self._play_stream.write(data.astype(np.float32))
+            print(f"[DesktopAudio] Data written to stream")
+
+            # Wait for playback to complete
+            # Calculate expected playback time
+            playback_time = len(data) / samplerate
+            print(f"[DesktopAudio] Waiting {playback_time:.3f} seconds for playback to complete...")
+
+            # Use time-based waiting instead of relying on stream.active
+            time.sleep(playback_time + 0.5)  # Add 0.5 second buffer
+
+            print(f"[DesktopAudio] Playback completed")
+
+        except Exception as e:
+            print(f"[DesktopAudio] Error during playback: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Clean up
+            if self._play_stream is not None:
+                try:
+                    self._play_stream.stop()
+                    self._play_stream.close()
+                except Exception as e:
+                    print(f"[DesktopAudio] Error closing stream: {e}")
+                finally:
+                    self._play_stream = None
 
     def stop(self):
         """Stop all audio streams (input and output)."""
