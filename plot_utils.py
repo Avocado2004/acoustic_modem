@@ -255,5 +255,136 @@ def plot_rx_equalizer_final(Hk_smooth_list, subc_inds, fs, Nfft):
         except Exception as e:
             print(f"[PLOT] Failed to save complex response: {e}")
             
+        # Если есть история эквалайзера, строим график динамики
+        try:
+            from modem_rx import equalizer_history_list
+            if equalizer_history_list and len(equalizer_history_list) > 0:
+                print(f"[PLOT] Building equalizer dynamics plot from {len(equalizer_history_list)} packets")
+                plot_equalizer_dynamics(equalizer_history_list, subc_inds, fs, Nfft, 
+                                       title_prefix="Equalizer_Dynamics")
+        except Exception as e:
+            print(f"[PLOT] Error plotting equalizer dynamics: {e}")
+            
     except Exception as e:
         print(f"[PLOT] Error plotting final equalizer: {e}")
+def plot_equalizer_dynamics(equalizer_history_list, subc_inds, fs, Nfft, title_prefix="Equalizer Dynamics"):
+    """
+    Визуализация динамики работы адаптивного эквалайзера.
+    Строит график "водопад" (waterfall) показывающий изменение амплитуды |Hk|
+    по поднесущим во времени (по мере обработки символов).
+    
+    :param equalizer_history_list: Список историй эквалайзера по пакетам.
+           Каждый элемент - список массивов Hk для одного пакета.
+    :param subc_inds: Индексы поднесущих.
+    :param fs: Частота дискретизации.
+    :param Nfft: Размер FFT.
+    :param title_prefix: Префикс для названия графика.
+    """
+    if not equalizer_history_list or len(equalizer_history_list) == 0:
+        print("[PLOT] No equalizer dynamics data to plot")
+        return
+    
+    try:
+        import numpy as np
+        
+        # Собираем все состояния Hk в один массив
+        all_states = []
+        for pkt_history in equalizer_history_list:
+            if pkt_history and len(pkt_history) > 0:
+                all_states.extend(pkt_history)
+        
+        if len(all_states) == 0:
+            print("[PLOT] No valid history states found")
+            return
+        
+        # Преобразуем в массив: [n_symbols, n_subcarriers]
+        Hk_dynamics = np.array(all_states)
+        n_symbols, n_subcarriers = Hk_dynamics.shape
+        
+        freqs = subc_inds * fs / float(Nfft)
+        
+        # На мобильных платформах сохраняем данные в CSV
+        if not PLOTTING_AVAILABLE or plt is None:
+            # Сохраняем данные в CSV: Frequency, Symbol_0_Amplitude, Symbol_1_Amplitude, ...
+            header = "Frequency," + ",".join([f"Symbol_{i}_Amplitude" for i in range(min(n_symbols, 100))])
+            # Ограничиваем количество символов для CSV (чтобы файл не был слишком большим)
+            max_symbols = min(n_symbols, 100)
+            data = np.column_stack((freqs, np.abs(Hk_dynamics[:max_symbols, :]).T))
+            filename = f"{title_prefix.replace(' ', '_')}_data.csv"
+            np.savetxt(filename, data, delimiter=",", header=header, comments="")
+            print(f"[PLOT] Equalizer dynamics data saved to {filename}")
+            return
+        
+        # Строим график "водопад" (waterfall)
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+        
+        # 1. Водопад: амплитуда |Hk| по поднесущим во времени
+        # Используем imshow для визуализации
+        amplitude_data = np.abs(Hk_dynamics)
+        # Нормализуем для лучшей визуализации
+        amp_min = np.min(amplitude_data)
+        amp_max = np.max(amplitude_data)
+        
+        im = ax1.imshow(amplitude_data.T, aspect='auto', origin='lower',
+                        extent=[0, n_symbols, freqs[0], freqs[-1]],
+                        vmin=amp_min, vmax=amp_max, cmap='viridis')
+        ax1.set_xlabel("Symbol Index")
+        ax1.set_ylabel("Frequency (Hz)")
+        ax1.set_title(f"{title_prefix} - Amplitude Dynamics (Waterfall)")
+        plt.colorbar(im, ax=ax1, label="|Hk|")
+        
+        # 2. Несколько линий для ключевых моментов времени
+        # Выбираем несколько равномерно распределенных моментов времени
+        n_lines = min(10, n_symbols)
+        indices = np.linspace(0, n_symbols - 1, n_lines, dtype=int)
+        
+        for i, idx in enumerate(indices):
+            alpha = 0.3 + 0.7 * (i / max(1, n_lines - 1))  # Прозрачность от 0.3 до 1.0
+            ax2.plot(freqs, np.abs(Hk_dynamics[idx, :]), 
+                    label=f"Symbol {idx}", alpha=alpha, linewidth=1)
+        
+        ax2.set_xlabel("Frequency (Hz)")
+        ax2.set_ylabel("Amplitude |Hk|")
+        ax2.set_title(f"{title_prefix} - Amplitude Evolution (Multiple Lines)")
+        ax2.grid(True, alpha=0.3)
+        # Легенда может быть слишком большой, поэтому размещаем её снаружи
+        ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+        
+        plt.tight_layout()
+        
+        try:
+            filename = f"{title_prefix.replace(' ', '_')}.png"
+            plt.savefig(filename, dpi=150, bbox_inches="tight")
+            print(f"[PLOT] Equalizer dynamics plot saved to {filename}")
+        except Exception as e:
+            print(f"[PLOT] Failed to save dynamics plot: {e}")
+        plt.close(fig)
+        
+        # Дополнительно: график изменения амплитуды для конкретных поднесущих
+        try:
+            fig2, ax3 = plt.subplots(figsize=(10, 6))
+            # Выбираем несколько поднесущих (например, первую, среднюю и последнюю)
+            selected_indices = [0, n_subcarriers // 2, n_subcarriers - 1]
+            for idx in selected_indices:
+                if idx < n_subcarriers:
+                    ax3.plot(range(n_symbols), np.abs(Hk_dynamics[:, idx]), 
+                            label=f"Subcarrier {subc_inds[idx]} ({freqs[idx]:.1f} Hz)")
+            
+            ax3.set_xlabel("Symbol Index")
+            ax3.set_ylabel("Amplitude |Hk|")
+            ax3.set_title(f"{title_prefix} - Amplitude for Selected Subcarriers")
+            ax3.grid(True, alpha=0.3)
+            ax3.legend()
+            
+            plt.tight_layout()
+            filename2 = f"{title_prefix.replace(' ', '_')}_selected.png"
+            plt.savefig(filename2, dpi=150, bbox_inches="tight")
+            print(f"[PLOT] Selected subcarriers dynamics saved to {filename2}")
+            plt.close(fig2)
+        except Exception as e:
+            print(f"[PLOT] Failed to save selected subcarriers plot: {e}")
+            
+    except Exception as e:
+        print(f"[PLOT] Error plotting equalizer dynamics: {e}")
+
+

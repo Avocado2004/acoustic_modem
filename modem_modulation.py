@@ -426,18 +426,27 @@ class AdaptiveEqualizer:
     по мере поступления символов данных.
     """
     
-    def __init__(self, initial_Hk, alpha=0.05, modulation='QPSK'):
+    def __init__(self, initial_Hk, alpha=0.05, modulation='QPSK', store_history=True, history_step=1):
         """
         Инициализация эквалайзера.
         
         :param initial_Hk: Начальная оценка канала (из преамбулы).
         :param alpha: Коэффициент сглаживания (0.0 - мгновенный отклик, 1.0 - игнор новых данных).
         :param modulation: Тип модуляции ('QPSK' или 'BPSK').
+        :param store_history: Сохранять ли историю изменения Hk.
+        :param history_step: Сохранять состояние каждые N символов (для экономии памяти).
         """
         self.Hk = np.array(initial_Hk, dtype=complex)
         self.alpha = alpha
         self.modulation = modulation
         self.symbol_count = 0
+        self.store_history = store_history
+        self.history_step = history_step
+        self.history = []  # Список для хранения истории Hk
+        
+        # Сохраняем начальное состояние
+        if self.store_history:
+            self.history.append(self.Hk.copy())
         
     def process(self, rx_fd):
         """
@@ -474,11 +483,25 @@ class AdaptiveEqualizer:
                 self.Hk[mask] = (1.0 - self.alpha) * self.Hk[mask] + self.alpha * Hk_new
         
         self.symbol_count += 1
+        
+        # Сохраняем историю с заданным шагом
+        if self.store_history and (self.symbol_count % self.history_step == 0 or self.symbol_count == 1):
+            self.history.append(self.Hk.copy())
+            if self.symbol_count % 100 == 0:
+                print(f"[EQ-DEBUG] Сохранено {len(self.history)} состояний Hk (символ {self.symbol_count})")
+        
         return x_hat
     
     def get_current_Hk(self):
         """Возвращает текущую оценку канала Hk."""
         return self.Hk.copy()
+    
+    def get_history(self):
+        """
+        Возвращает историю изменения Hk за все время работы.
+        Каждый элемент списка — это массив Hk в определенный момент времени.
+        """
+        return self.history
     
     def get_debug_info(self):
         """Возвращает отладочную информацию: средние амплитуда и фаза."""

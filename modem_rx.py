@@ -28,6 +28,7 @@ pkt0_header_offset = None
 pkt0_header_bytes = None
 rx_syms_list = []
 Hk_smooth_list = []
+equalizer_history_list = []  # Список для хранения истории эквалайзера по пакетам
 last_packet_used_pre = None
 
 
@@ -474,6 +475,17 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
                 globals()['last_packet_used_pre'] = cand
                 globals()['last_packet_end_sample'] = int(cand + len(preamble_td) + packet_blocks_expected * SYMBOL_LEN)
                 globals()['last_packet_rs_ok'] = rs_ok
+                
+                # Сохраняем историю эквалайзера для визуализации динамики
+                try:
+                    if 'equalizer_history_list' not in globals():
+                        globals()['equalizer_history_list'] = []
+                    history = equalizer.get_history()
+                    if history and len(history) > 0:
+                        globals()['equalizer_history_list'].append(history)
+                        print(f"[RX] Сохранена история эквалайзера: {len(history)} состояний для пакета {packet_idx}")
+                except Exception as e:
+                    print(f"[RX] Ошибка сохранения истории эквалайзера: {e}")
             except Exception:
                 pass
             if rs_ok >= n_cw * 0.9:
