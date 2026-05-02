@@ -238,6 +238,35 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
             Hk_s = Hk_mag * np.exp(1j*np.angle(Hk_est))
             print(f"[RX-DBG-DECODE] Hk_est magnitude range: {np.min(np.abs(Hk_est)):.6f} - {np.max(np.abs(Hk_est)):.6f}")
             print(f"[RX-DBG-DECODE] Hk_s magnitude: {Hk_mag:.6f}")
+            
+            # Сохраняем график эквалайзера для первого пакета
+            if packet_idx == 0 and PLOTTING_AVAILABLE:
+                try:
+                    import matplotlib.pyplot as plt
+                    # График амплитуды и фазы эквалайзера
+                    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+                    
+                    # Амплитудная характеристика
+                    freqs = subc_inds * fs / float(Nfft)
+                    ax1.plot(freqs, 20*np.log10(np.abs(Hk_s) + 1e-12), 'b-o', markersize=3)
+                    ax1.set_xlabel('Frequency (Hz)')
+                    ax1.set_ylabel('Magnitude (dB)')
+                    ax1.set_title('Equalizer Magnitude Response (Hk_s)')
+                    ax1.grid(True)
+                    
+                    # Фазовая характеристика
+                    ax2.plot(freqs, np.angle(Hk_s) * 180/np.pi, 'r-o', markersize=3)
+                    ax2.set_xlabel('Frequency (Hz)')
+                    ax2.set_ylabel('Phase (degrees)')
+                    ax2.set_title('Equalizer Phase Response (Hk_s)')
+                    ax2.grid(True)
+                    
+                    plt.tight_layout()
+                    plt.savefig('rx_equalizer.png', dpi=150, bbox_inches='tight')
+                    plt.close()
+                    print(f"[RX] График эквалайзера сохранен: rx_equalizer.png")
+                except Exception as e:
+                    print(f"[RX] Ошибка при сохранении графика эквалайзера: {e}")
         except Exception as e:
             print(f"[RX-DBG-DECODE] Exception in channel estimation: {e}")
             continue
@@ -309,6 +338,16 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
         
         if phi_est != 0.0:
             rx_syms_pkt = rx_syms_pkt * np.exp(-1j * phi_est)
+        
+        # Сохраняем диаграмму созвездия для первого пакета
+        if packet_idx == 0 and PLOTTING_AVAILABLE:
+            try:
+                from plot_utils import plot_constellation
+                plot_constellation(rx_syms_pkt[:min(4096, len(rx_syms_pkt))], 
+                                 title=f"RX Constellation pkt{packet_idx}")
+                print(f"[RX] Диаграмма созвездия сохранена для пакета {packet_idx}")
+            except Exception as e:
+                print(f"[RX] Ошибка при сохранении диаграммы созвездия: {e}")
 
         # ВСЕГДА используем QPSK (BPSK отключен до отладки)
         bits_pkt = qpsk_demap(rx_syms_pkt)

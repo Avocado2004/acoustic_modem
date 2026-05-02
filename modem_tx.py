@@ -248,6 +248,22 @@ def _transmit_data(data_bytes, total_data_len, filename_bytes, mode='T', packet_
     tx_out = np.concatenate((preroll, tx_packets_concat, postroll))
     tx_clipped, achieved_crest = apply_softclip_to_target_crest(tx_out, target_db=TARGET_CREST_DB)
     print(f"[SOFTCLIP] achieved crest = {achieved_crest:.3f} dB (target {TARGET_CREST_DB} dB)")
+    
+    # Сохраняем диаграммы переданного сигнала
+    if PLOTTING_AVAILABLE and plt is not None:
+        try:
+            from plot_utils import plot_spectrum, plot_signal
+            # Спектр переданного сигнала
+            freq = np.fft.fftfreq(len(tx_clipped), 1.0/fs)
+            spectrum = np.abs(np.fft.fft(tx_clipped))
+            plot_spectrum(freq[:len(freq)//2], 20*np.log10(spectrum[:len(spectrum)//2] + 1e-12), 
+                         title="TX Spectrum", filename="tx_spectrum.png")
+            # График сигнала
+            plot_signal(tx_clipped[:fs*2], fs, title="TX Signal", filename="tx_signal.png")
+            print(f"[TX] Диаграммы сохранены: tx_spectrum.png, tx_signal.png")
+        except Exception as e:
+            print(f"[TX] Ошибка при сохранении диаграмм: {e}")
+    
     max_abs = np.max(np.abs(tx_clipped)) if tx_clipped.size else 0.0
     if max_abs == 0:
         scale_to_int16 = 1.0
