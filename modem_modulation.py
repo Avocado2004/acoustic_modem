@@ -415,3 +415,73 @@ def bytes_to_ofdm_blocks_bytes(bstream: bytes):
     data_bits_local = np.concatenate(bits_blocks_local) if len(bits_blocks_local) > 0 else np.array([], dtype=int)
     td_local, nblocks_local = build_data_td(data_bits_local) if data_bits_local.size > 0 else (np.array([], dtype=float), 0)
     return td_local, nblocks_local
+
+# -----------------------
+# Адаптивный эквалайзер (Decision-Directed)
+# -----------------------
+class AdaptiveEqualizer:
+    """
+    Класс для адаптивного выравнивания частотной характеристики канала.
+    Использует подход Decision-Directed (DD) для уточнения оценки канала Hk
+    по мере поступления символов данных.
+    """
+    
+    def __init__(self, initial_Hk, alpha=0.05, modulation='QPSK'):
+        """
+        Инициализация эквалайзера.
+        
+        :param initial_Hk: Начальная оценка канала (из преамбулы).
+        :param alpha: Коэффициент сглаживания (0.0 - мгновенный отклик, 1.0 - игнор новых данных).
+        :param modulation: Тип модуляции ('QPSK' или 'BPSK').
+        """
+        self.Hk = np.array(initial_Hk, dtype=complex)
+        self.alpha = alpha
+        self.modulation = modulation
+        self.symbol_count = 0
+        
+    def process(self, rx_fd):
+        """
+        Обработка одного принятого OFDM символа (в частотной области).
+        
+        :param rx_fd: Комплексный массив поднесущих принятого символа (после FFT).
+        :return: Выровненный символ (x_hat).
+        """
+        # 1. Применяем текущий Hk (предварительное выравнивание)
+        # Добавляем малую константу для избежания деления на ноль
+        x_hat = rx_fd / (self.Hk + 1e-12)
+        
+        # 2. Принимаем "решение" (Decision) - маппим обратно в идеальный символ
+        if self.modulation == 'BPSK':
+            # Для BPSK: real > 0 -> 1+0j, иначе -1+0j
+            decision = np.where(np.real(x_hat) > 0, 1.0, -1.0) + 0j
+        else:
+            # Для QPSK: квадранты -> идеальные точки
+            re = np.where(np.real(x_hat) > 0, 1.0, -1.0)
+            im = np.where(np.imag(x_hat) > 0, 1.0, -1.0)
+            decision = (re + 1j * im) / np.sqrt(2)
+        
+        # 3. Оценка нового канала на основе решения: H_new = Y / X_decision
+        # Если decision близко к нулю, не обновляем (защита от шума)
+        mask = np.abs(decision) > 0.1
+        if np.any(mask):
+            Hk_new = rx_fd[mask] / decision[mask]
+            
+            # 4. Экспоненциальное скользящее среднее (EMA) для сглаживания
+            # Hk = (1 - alpha) * Hk_old + alpha * Hk_new
+            # Для векторов разной длины используем усреднение по маске
+            if len(Hk_new) > 0:
+                # Обновляем только те поднесущие, где есть надежное решение
+                self.Hk[mask] = (1.0 - self.alpha) * self.Hk[mask] + self.alpha * Hk_new
+        
+        self.symbol_count += 1
+        return x_hat
+    
+    def get_current_Hk(self):
+        """Возвращает текущую оценку канала Hk."""
+        return self.Hk.copy()
+    
+    def get_debug_info(self):
+        """Возвращает отладочную информацию: средние амплитуда и фаза."""
+        avg_mag = np.mean(np.abs(self.Hk))
+        avg_phase = np.mean(np.angle(self.Hk))
+        return avg_mag, avg_phase, self.symbol_count

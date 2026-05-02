@@ -11,7 +11,7 @@ from modem_config import (Nfft, Ncp, Nsub, subc_inds, fs, SYMBOL_LEN, DEFAULT_PA
                           RS_CW_BYTES, rs, SYMBOL_TARGET_RMS, AGC_ALPHA, AGC_DEBUG, MIN_RMS,
                           PLOTTING_AVAILABLE, _MAX_RS_FAIL_PRINTS_GLOBAL, SYNC_WINDOW_HALF)
 from modem_modulation import (qpsk_demap, bpsk_demap, ofdm_symbol, build_preamble, bytes_to_bits, bits_to_bytes,
-                              sync_by_corr, deinterleave_bits, BITS_PER_OFDM_SYMBOL)
+                               sync_by_corr, deinterleave_bits, BITS_PER_OFDM_SYMBOL, AdaptiveEqualizer)
 from modem_packet import parse_header, build_header, make_packet_header_bytes, simulate_packet_positions
 
 # Глобальные переменные состояния (инициализируются при работе)
@@ -248,6 +248,11 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
             print(f"[RX-DBG-DECODE] Hk_est magnitude range: {np.min(np.abs(Hk_est)):.6f} - {np.max(np.abs(Hk_est)):.6f}")
             print(f"[RX-DBG-DECODE] Hk_s magnitude: {Hk_mag:.6f}")
             
+            # Инициализируем адаптивный эквалайзер (Decision-Directed)
+            # Используем Hk_s как начальную оценку канала
+            equalizer = AdaptiveEqualizer(initial_Hk=Hk_s, alpha=0.05, modulation=modem_config.MODULATION)
+            print(f"[EQ] AdaptiveEqualizer initialized with alpha=0.05")
+            
             # Сохраняем график эквалайзера для первого пакета
             if packet_idx == 0 and PLOTTING_AVAILABLE:
                 try:
@@ -258,7 +263,7 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
         except Exception as e:
             print(f"[RX-DBG-DECODE] Exception in channel estimation: {e}")
             continue
-
+        
         try:
             pre_segment = rx[cand : cand + len(preamble_td)]
             pre_rms = np.sqrt(np.mean(pre_segment**2)) if pre_segment.size > 0 else MIN_RMS
@@ -267,7 +272,7 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
             packet_gain = 0.5 / pre_rms
         except Exception:
             packet_gain = 1.0
-
+        
         pkt_data_start = cand + len(preamble_td)
         pkt_payload_samples = packet_blocks_expected * SYMBOL_LEN
         seg = packet_gain * rx[pkt_data_start : pkt_data_start + pkt_payload_samples]
@@ -276,7 +281,7 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
         frames = seg.reshape(packet_blocks_expected, SYMBOL_LEN)
         
         # ИСПРАВЛЕНИЕ: инициализируем список для символов ПЕРЕД циклом
-        rx_syms_pkt_list = []  # Список для накопления символов
+        rx_syms_pkt_list = [] # Список для накопления символов
         
         for idxf, fr in enumerate(frames):
             frame_start_abs = pkt_data_start + idxf * SYMBOL_LEN
@@ -284,7 +289,7 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
             useful = fr[Ncp:]
             tv = t_frame_start + np.arange(Nfft) / float(fs)
             useful_corr = useful * np.exp(-1j * 2.0 * np.pi * f_err_loc * tv)
-
+ 
             cur_rms = np.sqrt(np.mean(np.abs(useful)**2)) if useful.size > 0 else 1e-12
             # Исправление: используем глобальную переменную last_agc_rms напрямую
             global last_agc_rms
@@ -300,12 +305,18 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
             if packet_idx == 0:
                 print(f"[AGC-DEBUG] pkt={packet_idx} frame={idxf} cur_rms={cur_rms:.6e} est_rms={est_rms:.6e} gain_sym={gain_sym:.3f}")
                 print(f"[AGC-DEBUG] useful stats: min={np.min(useful):.6f}, max={np.max(useful):.6f}, rms={np.sqrt(np.mean(useful**2)):.6f}")
-
+ 
             useful = useful * gain_sym
-
+ 
             try:
                 F = np.fft.fft(useful_corr) / Nfft  # ДЕЛИМ НА Nfft ДЛЯ СОГЛАСОВАНИЯ С Hk_s
-                subc = F[subc_inds] / Hk_s
+                # Используем адаптивный эквалайзер вместо прямого деления на Hk_s
+                subc = equalizer.process(F[subc_inds])
+                
+                # Отладочный вывод для мониторинга работы эквалайзера
+                if packet_idx == 0 and (idxf % 10 == 0 or idxf < 5):
+                    avg_mag, avg_phase, sym_count = equalizer.get_debug_info()
+                    print(f"[EQ-DEBUG] frame={idxf} avg_mag={avg_mag:.4f} avg_phase={avg_phase:+.4f} sym_count={sym_count}")
             except Exception:
                 subc = np.zeros(Nsub, dtype=complex)
             
