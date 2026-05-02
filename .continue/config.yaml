@@ -1,0 +1,50 @@
+# Continue configuration file
+# https://docs.continue.dev/reference
+
+name: Acoustic Modem Config
+version: 1.0.0
+schema: v1
+
+# Define models available for use
+# https://docs.continue.dev/customization/models
+models:
+  # Ollama local models (requires Ollama installed and running)
+  - name: Qwen 2.5 Coder 7B
+    provider: ollama
+    model: qwen2.5-coder:7b
+    contextLength: 32768
+
+  - name: Llama 3.1 8B
+    provider: ollama
+    model: llama3.1:8b
+    contextLength: 131072
+
+  # OpenRouter models (free tier available)
+  - name: Google Gemini Flash 2.0
+    provider: openrouter
+    model: google/gemini-2.0-flash-exp:free
+    apiKey: ${{ env.OPENROUTER_API_KEY }}
+
+  - name: Meta Llama 3.1 8B (OpenRouter)
+    provider: openrouter
+    model: meta-llama/llama-3.1-8b-instruct:free
+    apiKey: ${{ env.OPENROUTER_API_KEY }}
+
+# Embeddings provider (optional, for codebase indexing)
+# https://docs.continue.dev/customization/embeddings
+embeddingsProvider:
+  provider: ollama
+  model: nomic-embed-text
+
+# Context providers (optional)
+# https://docs.continue.dev/customization/context-providers
+contextProviders:
+  - name: diff
+  - name: file
+  - name: code
+  - name: folder
+  - name: search
+
+# MCP Servers (optional)
+# https://docs.continue.dev/customization/mcp-tools
+mcpServers: []

@@ -67,7 +67,6 @@ def receive_from_file(wav_path):
     print(f"[RX-DBG] found {len(candidates)} preamble peak candidates (threshold={threshold:.6g})")
     
     # Используем фиксированную позицию преамбулы (preroll = 12000)
-    # Так как мы точно знаем, где находится преамбула
     expected_sync = 12000
     print(f"[RX-DBG] Using FIXED preroll position: {expected_sync}")
     sync_idx = expected_sync
@@ -166,6 +165,17 @@ def receive_from_file(wav_path):
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(rec_text)
         print(f"[RX TEXT] Saved to: {out_path}")
+    
+    # Построение итогового графика эквалайзера после завершения приема
+    if PLOTTING_AVAILABLE:
+        try:
+            from plot_utils import plot_rx_equalizer_final
+            global Hk_smooth_list
+            if 'Hk_smooth_list' in globals() and Hk_smooth_list:
+                print(f"[RX] Построение итогового графика эквалайзера...")
+                plot_rx_equalizer_final(Hk_smooth_list, subc_inds, fs, Nfft)
+        except Exception as e:
+            print(f"[RX] Ошибка при построении итогового графика эквалайзера: {e}")
         
     return True
 
@@ -184,7 +194,6 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
         globals()['_rs_fail_prints_count'] = 0
 
     # ИСПРАВЛЕНИЕ: используем переданный индекс напрямую, без поиска в окне
-    # Так как мы уже знаем точную позицию преамбулы (12000)
     combined = [pref_abs]
 
     try:
@@ -242,29 +251,8 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
             # Сохраняем график эквалайзера для первого пакета
             if packet_idx == 0 and PLOTTING_AVAILABLE:
                 try:
-                    import matplotlib.pyplot as plt
-                    # График амплитуды и фазы эквалайзера
-                    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
-                    
-                    # Амплитудная характеристика
-                    freqs = subc_inds * fs / float(Nfft)
-                    ax1.plot(freqs, 20*np.log10(np.abs(Hk_s) + 1e-12), 'b-o', markersize=3)
-                    ax1.set_xlabel('Frequency (Hz)')
-                    ax1.set_ylabel('Magnitude (dB)')
-                    ax1.set_title('Equalizer Magnitude Response (Hk_s)')
-                    ax1.grid(True)
-                    
-                    # Фазовая характеристика
-                    ax2.plot(freqs, np.angle(Hk_s) * 180/np.pi, 'r-o', markersize=3)
-                    ax2.set_xlabel('Frequency (Hz)')
-                    ax2.set_ylabel('Phase (degrees)')
-                    ax2.set_title('Equalizer Phase Response (Hk_s)')
-                    ax2.grid(True)
-                    
-                    plt.tight_layout()
-                    plt.savefig('rx_equalizer.png', dpi=150, bbox_inches='tight')
-                    plt.close()
-                    print(f"[RX] График эквалайзера сохранен: rx_equalizer.png")
+                    from plot_utils import plot_rx_equalizer
+                    plot_rx_equalizer(Hk_s, subc_inds, fs, Nfft, packet_idx)
                 except Exception as e:
                     print(f"[RX] Ошибка при сохранении графика эквалайзера: {e}")
         except Exception as e:
@@ -813,7 +801,7 @@ def live_receive_and_process():
             else:
                 rec_text = assembled.decode("utf-8", errors="ignore")
                 print("[RX TEXT]", rec_text)
-
+        
         finally:
             globals()['rx'] = globals_backup['rx']
             globals()['abs_corr'] = globals_backup['abs_corr']
@@ -831,6 +819,18 @@ def live_receive_and_process():
         except Exception:
             pass
         print("[LIVE] microphone stream stopped")
+        
+        # Построение итогового графика эквалайзера после завершения живого приема
+        if PLOTTING_AVAILABLE:
+            try:
+                from plot_utils import plot_rx_equalizer_final
+                global Hk_smooth_list
+                if 'Hk_smooth_list' in globals() and Hk_smooth_list:
+                    print(f"[RX] Построение итогового графика эквалайзера...")
+                    plot_rx_equalizer_final(Hk_smooth_list, subc_inds, fs, Nfft)
+            except Exception as e:
+                print(f"[RX] Ошибка при построении итогового графика эквалайзера: {e}")
+
 
 # -----------------------
 # Audio backend wrapper (for backward compatibility with tests)

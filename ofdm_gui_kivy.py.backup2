@@ -35,30 +35,6 @@ except Exception:
 
 import numpy as np
 
-# Catch unhandled exceptions globally
-import sys
-import traceback
-
-def global_excepthook(exc_type, exc_value, exc_traceback):
-    """Log unhandled exceptions to file"""
-    error_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-    try:
-        with open('/tmp/global_exception.log', 'a') as f:
-            import time
-            f.write(f"\n{'='*60}\n")
-            f.write(f"{time.strftime('%H:%M:%S')} - Unhandled exception:\n")
-            f.write(error_msg)
-            f.write(f"{'='*60}\n")
-    except:
-        pass
-    # Print to stderr as well
-    print(error_msg, file=sys.stderr)
-    # Call the original excepthook
-    sys.__excepthook__(exc_type, exc_value, exc_traceback)
-
-sys.excepthook = global_excepthook
-
-
 MODEM_MODULE_NAME = "test_modem_simple"
 
 _modem = None
@@ -102,12 +78,111 @@ def fmt_log_line(msg):
     t = datetime.now().strftime("%H:%M:%S")
     return f"[{t}] {msg}\n"
 
+def fallback_build_tx_audio_from_bytes(payload_bytes: bytes, mode_flag: bytes = b'F',
+                                       filename_bytes: bytes = b'', settings=None):
+    if _modem is None:
+        raise RuntimeError("modem module required for fallback builder")
+    
+    fs = gattr(_modem, "fs", 48000)
+    SYMBOL_LEN = gattr(_modem, "SYMBOL_LEN", None)
+    if SYMBOL_LEN is None:
+        Nfft = gattr(_modem, "Nfft", None)
+        Ncp = gattr(_modem, "Ncp", None)
+        if Nfft is None or Ncp is None:
+            raise RuntimeError("modem lacks Nfft/Ncp, cannot compute SYMBOL_LEN in fallback builder")
+        SYMBOL_LEN = Nfft + Ncp
+    
+    packet_blocks = int(gattr(_modem, "DEFAULT_PACKET_BLOCKS", 75))
+    version = 0
+    tx_type_bits = 0b11 if mode_flag == b'F' else (0b10 if mode_flag == b'T' else 0b00)
+    
+    import zlib
+    crc_val = zlib.crc32(payload_bytes) & 0xFFFFFFFF
+    
+    build_header = gattr(_modem, "build_header", None)
+    if build_header is None:
+        raise RuntimeError("modem does not expose build_header required for fallback builder")
+    
+    transmission_header = build_header(b'F' if mode_flag == b'F' else b'T',
+                                       len(payload_bytes),
+                                       filename_bytes=filename_bytes,
+                                       packet_no=0,
+                                       version=version,
+                                       packet_blocks=packet_blocks,
+                                       crc32=crc_val)
+    
+    bytes_left = payload_bytes
+    packet_no = 0
+    samples_list = []
+    build_preamble = gattr(_modem, "build_preamble", None)
+    if build_preamble is None:
+        raise RuntimeError("modem does not expose build_preamble required for fallback builder")
+    preamble_td = build_preamble()
+    bytes_to_blocks = gattr(_modem, "bytes_to_ofdm_blocks_bytes", None)
+    if bytes_to_blocks is None:
+        raise RuntimeError("modem must expose bytes_to_ofdm_blocks_bytes for fallback builder")
+    
+    while True:
+        is_first = (packet_no == 0)
+        if is_first:
+            header_bytes = transmission_header + transmission_header + transmission_header
+        else:
+            make_packet_header_bytes = gattr(_modem, "make_packet_header_bytes", None)
+            if make_packet_header_bytes is None:
+                header_bytes = bytes([0x00 | (tx_type_bits & 0x03),
+                                      (packet_no >> 16) & 0xFF,
+                                      (packet_no >> 8) & 0xFF,
+                                      packet_no & 0xFF])
+            else:
+                header_bytes = make_packet_header_bytes(packet_no, tx_type_bits)
+        
+        allowed_blocks = packet_blocks
+        
+        lo = 0
+        hi = len(bytes_left)
+        best_mid = 0
+        best_td = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            test_bytes = header_bytes + bytes_left[:mid]
+            try:
+                td_local, nblocks_local = bytes_to_blocks(test_bytes)
+            except Exception:
+                nblocks_local = allowed_blocks + 1
+            if nblocks_local <= allowed_blocks:
+                best_mid = mid
+                best_td = td_local
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        
+        if best_td is None:
+            td_local, nblocks_local = bytes_to_blocks(header_bytes)
+            best_td = td_local
+        
+        packet_samples = np.concatenate((preamble_td, best_td)) if best_td.size else preamble_td.copy()
+        samples_list.append(packet_samples)
+        
+        bytes_left = bytes_left[best_mid:]
+        packet_no += 1
+        if len(bytes_left) == 0:
+            break
+        if packet_no > 10000:
+            break
+    
+    tx_concat = np.concatenate(samples_list) if len(samples_list) > 0 else np.array([], dtype=float)
+    preroll_len = int(0.1 * fs)
+    postroll_len = int(0.1 * fs)
+    tx_out = np.concatenate((np.zeros(preroll_len, dtype=tx_concat.dtype), tx_concat, np.zeros(postroll_len, dtype=tx_concat.dtype)))
+    info = {"samples": len(tx_out), "fs": fs, "packets": packet_no}
+    return tx_out.astype(np.float64), info
+
 def get_builder():
     if _modem is not None:
         b = gattr(_modem, "build_tx_audio_from_bytes", None)
         if b is not None:
             return b
-    raise RuntimeError("Modem module not loaded and no fallback builder available")
+    return fallback_build_tx_audio_from_bytes
 
 _play_lock = threading.Lock()
 _is_playing = False
@@ -315,22 +390,19 @@ class OfdmRoot(BoxLayout):
         self.add_widget(top)
     
     def _on_modulation_change(self, text):
-        """Handle modulation change with proper global variable updates"""
+        """Ultra-minimal version - just log to file"""
         try:
-            import time
-            with open('/tmp/modem_change.log', 'a') as f:
-                f.write(f"{time.strftime('%H:%M:%S')} - _on_modulation_change called with text='{text}'\n")
+            with open('/tmp/modem_simple.log', 'a') as f:
+                import time
+                f.write(f"{time.strftime('%H:%M:%S')} - Called with text={text}\n")
             
             self.modulation = text
             
             if _modem is not None:
-                # Update ALL related global variables in test_modem_simple
-                # Use _modem directly (it's already imported)
-                
-                # Set MODULATION
+                with open('/tmp/modem_simple.log', 'a') as f:
+                    f.write(f"{time.strftime('%H:%M:%S')} - Setting MODULATION\n")
                 _modem.MODULATION = text
                 
-                # Update BITS_PER_SYMBOL and BITS_PER_OFDM_SYMBOL
                 if text == 'BPSK':
                     _modem.BITS_PER_SYMBOL = 1
                     _modem.DEFAULT_PACKET_BLOCKS = 150
@@ -338,34 +410,20 @@ class OfdmRoot(BoxLayout):
                     _modem.BITS_PER_SYMBOL = 2
                     _modem.DEFAULT_PACKET_BLOCKS = 75
                 
-                # Update dependent variable
-                if hasattr(_modem, 'Nsub'):
-                    _modem.BITS_PER_OFDM_SYMBOL = _modem.Nsub * _modem.BITS_PER_SYMBOL
+                with open('/tmp/modem_simple.log', 'a') as f:
+                    f.write(f"{time.strftime('%H:%M:%S')} - Set BITS_PER_SYMBOL={_modem.BITS_PER_SYMBOL}\n")
                 
-                with open('/tmp/modem_change.log', 'a') as f:
-                    f.write(f"{time.strftime('%H:%M:%S')} - Updated: MODULATION={_modem.MODULATION}, BITS_PER_SYMBOL={_modem.BITS_PER_SYMBOL}\n")
-                
-                # Rebuild preamble and phases if needed (with error handling)
-                try:
-                    if hasattr(_modem, 'init_phases'):
-                        _modem.init_phases()
-                    if hasattr(_modem, 'build_preamble'):
-                        _modem.preamble_td = _modem.build_preamble()
-                    with open('/tmp/modem_change.log', 'a') as f:
-                        f.write(f"{time.strftime('%H:%M:%S')} - Rebuilt preamble and phases\n")
-                except Exception as rebuild_err:
-                    with open('/tmp/modem_change.log', 'a') as f:
-                        f.write(f"{time.strftime('%H:%M:%S')} - Rebuild error (non-fatal): {rebuild_err}\n")
-                
-                with open('/tmp/modem_change.log', 'a') as f:
+                # Don't call append_diag - it uses Clock.schedule_once
+                # Just write to file
+                with open('/tmp/modem_simple.log', 'a') as f:
                     f.write(f"{time.strftime('%H:%M:%S')} - SUCCESS!\n")
             else:
-                with open('/tmp/modem_change.log', 'a') as f:
+                with open('/tmp/modem_simple.log', 'a') as f:
                     f.write(f"{time.strftime('%H:%M:%S')} - Modem not loaded\n")
         except Exception as e:
-            import traceback
-            with open('/tmp/modem_change.log', 'a') as f:
-                f.write(f"{time.strftime('%H:%M:%S')} - ERROR in _on_modulation_change: {e}\n")
+            with open('/tmp/modem_simple.log', 'a') as f:
+                import traceback
+                f.write(f"{time.strftime('%H:%M:%S')} - ERROR: {e}\n")
                 f.write(traceback.format_exc() + '\n')
 
     def _apply_modulation_change(self):
@@ -624,13 +682,13 @@ class OfdmRoot(BoxLayout):
             if _modem is not None:
                 if hasattr(_modem, "init_phases"):
                     try:
-                        _modem.init_phases()
+                        # # # # _modem.init_phases()  # DISABLED FOR DEBUG  # DISABLED FOR DEBUG  # DISABLED FOR DEBUG  # DISABLED FOR DEBUG
                         self.append_diag(fmt_log_line("Settings applied: init_phases() called"))
                     except Exception as e:
                         self.append_diag(fmt_log_line(f"init_phases() failed: {e}"))
                 if hasattr(_modem, "build_preamble"):
                     try:
-                        _modem.preamble_td = _modem.build_preamble()
+                        # _modem.preamble_td = _modem.build_preamble()  # DISABLED FOR DEBUG
                         self.append_diag(fmt_log_line("Settings applied: preamble rebuilt"))
                     except Exception as e:
                         self.append_diag(fmt_log_line(f"build_preamble() failed: {e}"))
@@ -668,17 +726,14 @@ class OfdmRoot(BoxLayout):
         
         def _build():
             try:
-                import traceback
                 builder = get_builder()
                 tx, info = builder(payload, mode_flag=(b'T' if mode == "Text" else b'F'),
-                                     filename_bytes=filename_bytes, settings=self.settings)
+                                    filename_bytes=filename_bytes, settings=self.settings)
                 self.tx_audio = tx
                 self.tx_info = info
                 self.append_diag(fmt_log_line(f"Generated audio: samples={info.get('samples', len(tx))} fs={info.get('fs','n/a')} packets={info.get('packets','n/a')}"))
             except Exception as e:
-                error_detail = traceback.format_exc()
                 self.append_diag(fmt_log_line("Audio generation failed: " + str(e)))
-                self.append_diag(error_detail)
         threading.Thread(target=_build, daemon=True).start()
     
     def on_save_audio(self):
@@ -801,7 +856,7 @@ class OfdmRoot(BoxLayout):
             if not hasattr(_modem, "preamble_td") or _modem.preamble_td is None:
                 if hasattr(_modem, "build_preamble"):
                     try:
-                        _modem.preamble_td = _modem.build_preamble()
+                        # _modem.preamble_td = _modem.build_preamble()  # DISABLED FOR DEBUG
                         self.append_diag(fmt_log_line("Load WAV: preamble_td built in modem"))
                     except Exception as e:
                         self.append_diag(fmt_log_line(f"Load WAV: build_preamble() failed: {e}"))
@@ -810,7 +865,7 @@ class OfdmRoot(BoxLayout):
             
             if hasattr(_modem, "init_phases"):
                 try:
-                    _modem.init_phases()
+                    # # # _modem.init_phases()  # DISABLED FOR DEBUG  # DISABLED FOR DEBUG  # DISABLED FOR DEBUG
                     self.append_diag(fmt_log_line("Load WAV: init_phases() called"))
                 except Exception as e:
                     self.append_diag(fmt_log_line(f"Load WAV: init_phases() failed: {e}"))
@@ -891,7 +946,7 @@ class OfdmRoot(BoxLayout):
                 if not hasattr(_modem, "preamble_td") or _modem.preamble_td is None:
                     if hasattr(_modem, "build_preamble"):
                         try:
-                            _modem.preamble_td = _modem.build_preamble()
+                            # _modem.preamble_td = _modem.build_preamble()  # DISABLED FOR DEBUG
                             self.append_diag(fmt_log_line("preamble_td built"))
                         except Exception as e:
                             self.append_diag(fmt_log_line(f"build_preamble() failed: {e}"))
@@ -899,7 +954,7 @@ class OfdmRoot(BoxLayout):
                         self.append_diag(fmt_log_line("Warning: build_preamble() not found in modem module"))
                 if hasattr(_modem, "init_phases"):
                     try:
-                        _modem.init_phases()
+                        # # _modem.init_phases()  # DISABLED FOR DEBUG  # DISABLED FOR DEBUG
                         self.append_diag(fmt_log_line("init_phases() called"))
                     except Exception as e:
                         self.append_diag(fmt_log_line(f"init_phases() failed: {e}"))
@@ -1057,6 +1112,11 @@ class OfdmApp(App):
     def build(self):
         Window.size = (900, 1000)
         root = OfdmRoot()
+        # Auto-switch to BPSK after 2 seconds for testing
+        def auto_switch(dt):
+            print("Auto-switching to BPSK...")
+            root.modulation_spinner.text = 'BPSK'
+        Clock.schedule_once(auto_switch, 2)
         return root
 
 if __name__ == "__main__":
