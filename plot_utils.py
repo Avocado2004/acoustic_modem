@@ -315,71 +315,109 @@ def plot_equalizer_dynamics(equalizer_history_list, subc_inds, fs, Nfft, title_p
             print(f"[PLOT] Equalizer dynamics data saved to {filename}")
             return
         
-        # Строим график "водопад" (waterfall)
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+        # Строим графики динамики: амплитуда и фаза
+        # Создаем фигуру с 4 подграфиками: 2 для амплитуды, 2 для фазы
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
         
+        # --- АМПЛИТУДА ---
         # 1. Водопад: амплитуда |Hk| по поднесущим во времени
-        # Используем imshow для визуализации
         amplitude_data = np.abs(Hk_dynamics)
-        # Нормализуем для лучшей визуализации
         amp_min = np.min(amplitude_data)
         amp_max = np.max(amplitude_data)
         
-        im = ax1.imshow(amplitude_data.T, aspect='auto', origin='lower',
-                        extent=[0, n_symbols, freqs[0], freqs[-1]],
-                        vmin=amp_min, vmax=amp_max, cmap='viridis')
+        im1 = ax1.imshow(amplitude_data.T, aspect='auto', origin='lower',
+                         extent=[0, n_symbols, freqs[0], freqs[-1]],
+                         vmin=amp_min, vmax=amp_max, cmap='viridis')
         ax1.set_xlabel("Symbol Index")
         ax1.set_ylabel("Frequency (Hz)")
-        ax1.set_title(f"{title_prefix} - Amplitude Dynamics (Waterfall)")
-        plt.colorbar(im, ax=ax1, label="|Hk|")
+        ax1.set_title(f"{title_prefix} - Amplitude Waterfall")
+        plt.colorbar(im1, ax=ax1, label="|Hk|")
         
-        # 2. Несколько линий для ключевых моментов времени
-        # Выбираем несколько равномерно распределенных моментов времени
+        # 2. Линии эволюции амплитуды
         n_lines = min(10, n_symbols)
         indices = np.linspace(0, n_symbols - 1, n_lines, dtype=int)
         
         for i, idx in enumerate(indices):
-            alpha = 0.3 + 0.7 * (i / max(1, n_lines - 1))  # Прозрачность от 0.3 до 1.0
-            ax2.plot(freqs, np.abs(Hk_dynamics[idx, :]), 
-                    label=f"Symbol {idx}", alpha=alpha, linewidth=1)
+            alpha = 0.3 + 0.7 * (i / max(1, n_lines - 1))
+            ax2.plot(freqs, np.abs(Hk_dynamics[idx, :]),
+                    label=f"Sym {idx}", alpha=alpha, linewidth=1)
         
         ax2.set_xlabel("Frequency (Hz)")
         ax2.set_ylabel("Amplitude |Hk|")
-        ax2.set_title(f"{title_prefix} - Amplitude Evolution (Multiple Lines)")
+        ax2.set_title(f"{title_prefix} - Amplitude Evolution")
         ax2.grid(True, alpha=0.3)
-        # Легенда может быть слишком большой, поэтому размещаем её снаружи
         ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+        
+        # --- ФАЗА ---
+        # 3. Водопад: фаза (angle) по поднесущим во времени
+        phase_data = np.angle(Hk_dynamics)  # Фаза в радианах
+        phase_min = np.min(phase_data)
+        phase_max = np.max(phase_data)
+        
+        im2 = ax3.imshow(phase_data.T, aspect='auto', origin='lower',
+                         extent=[0, n_symbols, freqs[0], freqs[-1]],
+                         vmin=phase_min, vmax=phase_max, cmap='twilight')
+        ax3.set_xlabel("Symbol Index")
+        ax3.set_ylabel("Frequency (Hz)")
+        ax3.set_title(f"{title_prefix} - Phase Waterfall")
+        plt.colorbar(im2, ax=ax3, label="Phase (rad)")
+        
+        # 4. Линии эволюции фазы
+        for i, idx in enumerate(indices):
+            alpha = 0.3 + 0.7 * (i / max(1, n_lines - 1))
+            ax4.plot(freqs, np.angle(Hk_dynamics[idx, :]),
+                    label=f"Sym {idx}", alpha=alpha, linewidth=1)
+        
+        ax4.set_xlabel("Frequency (Hz)")
+        ax4.set_ylabel("Phase (rad)")
+        ax4.set_title(f"{title_prefix} - Phase Evolution")
+        ax4.grid(True, alpha=0.3)
+        ax4.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
         
         plt.tight_layout()
         
         try:
             filename = f"{title_prefix.replace(' ', '_')}.png"
             plt.savefig(filename, dpi=150, bbox_inches="tight")
-            print(f"[PLOT] Equalizer dynamics plot saved to {filename}")
+            print(f"[PLOT] Equalizer dynamics plot (amplitude + phase) saved to {filename}")
         except Exception as e:
             print(f"[PLOT] Failed to save dynamics plot: {e}")
         plt.close(fig)
         
-        # Дополнительно: график изменения амплитуды для конкретных поднесущих
+        # Дополнительно: графики для выбранных поднесущих (амплитуда и фаза)
         try:
-            fig2, ax3 = plt.subplots(figsize=(10, 6))
-            # Выбираем несколько поднесущих (например, первую, среднюю и последнюю)
+            fig2, (ax5, ax6) = plt.subplots(2, 1, figsize=(10, 8))
+            # Выбираем несколько поднесущих
             selected_indices = [0, n_subcarriers // 2, n_subcarriers - 1]
+            
+            # Амплитуда для выбранных поднесущих
             for idx in selected_indices:
                 if idx < n_subcarriers:
-                    ax3.plot(range(n_symbols), np.abs(Hk_dynamics[:, idx]), 
-                            label=f"Subcarrier {subc_inds[idx]} ({freqs[idx]:.1f} Hz)")
+                    ax5.plot(range(n_symbols), np.abs(Hk_dynamics[:, idx]),
+                            label=f"Subc {subc_inds[idx]} ({freqs[idx]:.1f} Hz)")
             
-            ax3.set_xlabel("Symbol Index")
-            ax3.set_ylabel("Amplitude |Hk|")
-            ax3.set_title(f"{title_prefix} - Amplitude for Selected Subcarriers")
-            ax3.grid(True, alpha=0.3)
-            ax3.legend()
+            ax5.set_xlabel("Symbol Index")
+            ax5.set_ylabel("Amplitude |Hk|")
+            ax5.set_title(f"{title_prefix} - Amplitude for Selected Subcarriers")
+            ax5.grid(True, alpha=0.3)
+            ax5.legend()
+            
+            # Фаза для выбранных поднесущих
+            for idx in selected_indices:
+                if idx < n_subcarriers:
+                    ax6.plot(range(n_symbols), np.angle(Hk_dynamics[:, idx]),
+                            label=f"Subc {subc_inds[idx]} ({freqs[idx]:.1f} Hz)")
+            
+            ax6.set_xlabel("Symbol Index")
+            ax6.set_ylabel("Phase (rad)")
+            ax6.set_title(f"{title_prefix} - Phase for Selected Subcarriers")
+            ax6.grid(True, alpha=0.3)
+            ax6.legend()
             
             plt.tight_layout()
             filename2 = f"{title_prefix.replace(' ', '_')}_selected.png"
             plt.savefig(filename2, dpi=150, bbox_inches="tight")
-            print(f"[PLOT] Selected subcarriers dynamics saved to {filename2}")
+            print(f"[PLOT] Selected subcarriers dynamics (amplitude + phase) saved to {filename2}")
             plt.close(fig2)
         except Exception as e:
             print(f"[PLOT] Failed to save selected subcarriers plot: {e}")
