@@ -21,18 +21,34 @@ if not IS_MOBILE:
 else:
     print("[PLOT] Mobile platform detected, plotting disabled")
 
-def plot_constellation(symb, title="Constellation"):
+
+def plot_constellation(symb, title="Constellation", use_gradient=False):
     """
-    Plot or save constellation data.
-    On mobile platforms, saves data to CSV instead of plotting.
+    Отрисовка или сохранение данных созвездия (constellation diagram).    
+    
+    Параметры:
+    - symb: массив комплексных чисел (символы)
+    - title: заголовок графика
+    - use_gradient: если True, точки раскрашиваются в градиенте от синего (начало) к красному (конец)
+                  если False (по умолчанию), все точки одного цвета (синие)
+    
+    На мобильных платформах сохраняет данные в CSV вместо построения графиков.
+    При use_gradient=True в CSV добавляется столбец с индексом точки.
     """
     if not PLOTTING_AVAILABLE or plt is None:
         # On mobile or when matplotlib is not available, save data to file
         try:
             import numpy as np
-            data = np.column_stack((np.real(symb), np.imag(symb)))
-            filename = title.replace(" ", "_") + "_data.csv"
-            np.savetxt(filename, data, delimiter=",", header="I,Q", comments="")
+            if use_gradient:
+                # Добавляем индекс точки для сохранения порядка
+                indices = np.arange(len(symb))
+                data = np.column_stack((np.real(symb), np.imag(symb), indices))
+                filename = title.replace(" ", "_") + "_data.csv"
+                np.savetxt(filename, data, delimiter=",", header="I,Q,Index", comments="")
+            else:
+                data = np.column_stack((np.real(symb), np.imag(symb)))
+                filename = title.replace(" ", "_") + "_data.csv"
+                np.savetxt(filename, data, delimiter=",", header="I,Q", comments="")
             print(f"[PLOT] Constellation data saved to {filename}")
         except Exception as e:
             print(f"[PLOT] Failed to save constellation data: {e}")
@@ -40,8 +56,24 @@ def plot_constellation(symb, title="Constellation"):
     
     try:
         import numpy as np
+        
         plt.figure(figsize=(5, 5))
-        plt.plot(np.real(symb), np.imag(symb), 'o', markersize=2, alpha=0.6)
+        
+        if use_gradient and len(symb) > 0:
+            # Градиентный вывод: от синего (0) к красному (1)
+            indices = np.arange(len(symb))
+            # Нормализуем индексы от 0 до 1
+            norm_indices = indices / max(1, len(symb) - 1)  # избегаем деления на 0
+            
+            scatter = plt.scatter(np.real(symb), np.imag(symb), 
+                                c=norm_indices, cmap='bwr', 
+                                s=10, alpha=0.7, edgecolors='none')
+            plt.colorbar(scatter, label='Порядок точек (0=синий, 1=красный)')
+            print(f"[PLOT] Constellation with gradient: {len(symb)} points, blue->red")
+        else:
+            # Обычный вывод (все точки одним цветом)
+            plt.plot(np.real(symb), np.imag(symb), 'o', markersize=2, alpha=0.6, color='blue')
+        
         plt.axhline(0, color='grey', linewidth=0.5)
         plt.axvline(0, color='grey', linewidth=0.5)
         plt.title(title)
@@ -49,6 +81,7 @@ def plot_constellation(symb, title="Constellation"):
         plt.ylabel("Quadrature")
         plt.grid(True)
         plt.axis('equal')
+        
         # Save to file instead of showing
         try:
             filename = title.replace(" ", "_") + ".png"
@@ -59,6 +92,7 @@ def plot_constellation(symb, title="Constellation"):
         plt.close()
     except Exception as e:
         print(f"[PLOT] Error plotting constellation: {e}")
+
 
 def plot_signal(signal_data, fs, title="Signal", filename="signal.png"):
     """
@@ -95,6 +129,7 @@ def plot_signal(signal_data, fs, title="Signal", filename="signal.png"):
     except Exception as e:
         print(f"[PLOT] Error plotting signal: {e}")
 
+
 def plot_spectrum(freq, spectrum, title="Spectrum", filename="spectrum.png"):
     """
     Plot or save spectrum data.
@@ -128,6 +163,7 @@ def plot_spectrum(freq, spectrum, title="Spectrum", filename="spectrum.png"):
         plt.close()
     except Exception as e:
         print(f"[PLOT] Error plotting spectrum: {e}")
+
 
 def plot_rx_equalizer(Hk, subc_inds, fs, Nfft, packet_idx=0):
     """
@@ -180,6 +216,7 @@ def plot_rx_equalizer(Hk, subc_inds, fs, Nfft, packet_idx=0):
         plt.close(fig)
     except Exception as e:
         print(f"[PLOT] Error plotting equalizer: {e}")
+
 
 def plot_rx_equalizer_final(Hk_smooth_list, subc_inds, fs, Nfft):
     """
@@ -267,6 +304,7 @@ def plot_rx_equalizer_final(Hk_smooth_list, subc_inds, fs, Nfft):
             
     except Exception as e:
         print(f"[PLOT] Error plotting final equalizer: {e}")
+
 
 def plot_equalizer_dynamics(equalizer_history_list, subc_inds, fs, Nfft, title_prefix="Equalizer Dynamics"):
     """
@@ -425,6 +463,7 @@ def plot_equalizer_dynamics(equalizer_history_list, subc_inds, fs, Nfft, title_p
             
     except Exception as e:
         print(f"[PLOT] Error plotting equalizer dynamics: {e}")
+
 
 def plot_tx_diagrams(signal, fs, title_prefix="TX"):
     """

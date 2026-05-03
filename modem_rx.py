@@ -42,6 +42,9 @@ agc_history_list = []
 # Глобальный счётчик символов (нумеруется по всем пакетам)
 _global_symbol_counter = 0
 
+# Список для хранения символов созвездия (для градиентного вывода)
+rx_constellation_symbols = []
+
 
 # -----------------------
 # Вспомогательная функция для декодирования с конкретной модуляцией
@@ -182,6 +185,11 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
             subc = subc * np.exp(-1j * modem_config.subc_phases)
         
         rx_syms_pkt_list.append(subc)
+        
+        # Сохраняем символы для градиентного созвездия
+        global rx_constellation_symbols
+        rx_constellation_symbols.extend(subc)
+        print(f"[DEBUG] Добавлено {len(subc)} символов, всего: {len(rx_constellation_symbols)}")
     
     if len(rx_syms_pkt_list) == 0:
         return None
@@ -508,6 +516,18 @@ def receive_from_file(wav_path):
                 _global_symbol_counter = 0
         except Exception as e:
             print(f"[RX] Ошибка при построении графика AGC: {e}")
+    
+    # Отрисовка созвездия с градиентом (синий->красный) по порядку символов
+    if PLOTTING_AVAILABLE:
+        try:
+            from plot_utils import plot_constellation
+            global rx_constellation_symbols
+            if rx_constellation_symbols:
+                print(f"[DEBUG] Вызов plot_constellation с {len(rx_constellation_symbols)} символами")
+                plot_constellation(rx_constellation_symbols, "RX Constellation (gradient)", use_gradient=True)
+                rx_constellation_symbols.clear()  # Очищаем после отрисовки
+        except Exception as e:
+            print(f"[RX] Ошибка при построении созвездия: {e}")
     
     return True
 
@@ -841,6 +861,17 @@ def live_receive_and_process():
                     _global_symbol_counter = 0
             except Exception as e:
                 print(f"[RX] Ошибка при построении графика AGC: {e}")
+        # Отрисовка созвездия с градиентом (синий->красный) по порядку символов
+        if PLOTTING_AVAILABLE:
+            try:
+                from plot_utils import plot_constellation
+                global rx_constellation_symbols
+                if rx_constellation_symbols:
+                    print(f"[DEBUG] Вызов plot_constellation с {len(rx_constellation_symbols)} символами")
+                    plot_constellation(rx_constellation_symbols, "RX Constellation (gradient)", use_gradient=True)
+                    rx_constellation_symbols.clear()  # Очищаем после отрисовки
+            except Exception as e:
+                print(f"[RX] Ошибка при построении созвездия: {e}")
 
 
 # -----------------------
