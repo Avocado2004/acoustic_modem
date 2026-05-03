@@ -30,6 +30,8 @@ rx_syms_list = []
 Hk_smooth_list = []
 equalizer_history_list = []  # Список для хранения истории эквалайзера по пакетам
 last_packet_used_pre = None
+# Глобальный эквалайзер для сохранения состояния между пакетами
+global_equalizer = None
 
 
 # -----------------------
@@ -250,9 +252,15 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
             print(f"[RX-DBG-DECODE] Hk_s magnitude: {Hk_mag:.6f}")
             
             # Инициализируем адаптивный эквалайзер (Decision-Directed)
-            # Используем Hk_s как начальную оценку канала
-            equalizer = AdaptiveEqualizer(initial_Hk=Hk_s, alpha=0.05, modulation=modem_config.MODULATION)
-            print(f"[EQ] AdaptiveEqualizer initialized with alpha=0.05")
+            # Используем глобальный эквалайзер для сохранения состояния между пакетами
+            global global_equalizer
+            if global_equalizer is None:
+                # Создаем новый эквалайзер с уменьшенным alpha для плавной адаптации
+                global_equalizer = AdaptiveEqualizer(initial_Hk=Hk_s, alpha=0.02, modulation=modem_config.MODULATION)
+                print(f"[EQ] Global AdaptiveEqualizer initialized with alpha=0.02")
+            else:
+                print(f"[EQ] Using existing Global AdaptiveEqualizer (symbols processed: {global_equalizer.symbol_count})")
+            equalizer = global_equalizer
             
             # Сохраняем график эквалайзера для первого пакета
             if packet_idx == 0 and PLOTTING_AVAILABLE:
