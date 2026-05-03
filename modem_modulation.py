@@ -286,7 +286,8 @@ def build_preamble(reps=1, zc_root=1):
     S_zc = ofdm_symbol(zc_seq)
     pilot = np.full(Nsub, (1 + 1j) / np.sqrt(2))
     S_pilot = ofdm_symbol(pilot)
-    preamble = np.concatenate((S_zc, S_zc, S_pilot, S_pilot))
+    # Увеличиваем количество ZC-символов до 16 для повышения энергии сигнала
+    preamble = np.concatenate([S_zc] * 16 + [S_pilot, S_pilot])
     
     # Нормализуем преамбулу к SYMBOL_TX_TARGET (как и ofdm_symbol())
     eps = 1e-12
@@ -294,6 +295,9 @@ def build_preamble(reps=1, zc_root=1):
     if cur_rms < eps:
         cur_rms = eps
     preamble = preamble / cur_rms * SYMBOL_TX_TARGET
+    
+    # Отладочный вывод для проверки длины преамбулы
+    print(f"[PREAMBLE] Длина преамбулы увеличена: {len(preamble)} сэмплов, ZC символов: 16")
     return preamble
 
 def build_data_td(bits):

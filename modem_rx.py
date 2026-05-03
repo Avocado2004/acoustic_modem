@@ -9,7 +9,7 @@ import modem_config
 from modem_config import (Nfft, Ncp, Nsub, subc_inds, fs, SYMBOL_LEN, DEFAULT_PACKET_BLOCKS,
                            RS_CW_BITS, RS_DATA_BYTES,
                            RS_CW_BYTES, rs, SYMBOL_TARGET_RMS, AGC_ALPHA, AGC_DEBUG, MIN_RMS,
-                           PLOTTING_AVAILABLE, _MAX_RS_FAIL_PRINTS_GLOBAL, SYNC_WINDOW_HALF)
+                           PLOTTING_AVAILABLE, _MAX_RS_FAIL_PRINTS_GLOBAL, SYNC_WINDOW_HALF, TARGET_RMS)
 
 # Параметр эквалайзера для совместимости с run_loop.py
 eq_alpha = 0.02
@@ -361,6 +361,13 @@ def receive_from_file(wav_path):
     global rx, abs_corr, preamble_td
     rx = sig.astype(float) / np.iinfo(wavd.dtype).max
     
+    # Предварительный AGC для слабых сигналов перед поиском преамбулы
+    signal_rms = np.sqrt(np.mean(rx**2))
+    print(f"[AGC-PRE] До AGC: signal_rms={signal_rms:.6f}")
+    if signal_rms > 0:
+        rx = rx * (TARGET_RMS / signal_rms)
+        print(f"[AGC-PRE] После AGC: target={TARGET_RMS}, gain={TARGET_RMS/signal_rms:.3f}, новый RMS={np.sqrt(np.mean(rx**2)):.6f}")
+    
     # Получаем актуальную преамбулу
     from modem_modulation import build_preamble
     preamble_td_local = build_preamble()
@@ -381,7 +388,8 @@ def receive_from_file(wav_path):
     
     # Используем фиксированную позицию преамбулы
     expected_sync = 12000
-    print(f"[RX-DBG] Using FIXED preroll position: {expected_sync}")
+    # Отладочный вывод: значение окна поиска (хотя в текущей реализации используется фиксированная позиция)
+    print(f"[SYNC] SYNC_WINDOW_HALF={SYNC_WINDOW_HALF}, фиксированная позиция синхронизации: {expected_sync}")
     sync_idx = expected_sync
 
     pkt0_decoded, pkt0_rs_ok, pkt0_used_pre = decode_packet_at_candidate(sync_idx, DEFAULT_PACKET_BLOCKS, packet_idx=0, bytes_before_packet=0, expected_total=0)
@@ -610,6 +618,13 @@ def live_receive_and_process():
                 time.sleep(0.02)
                 continue
             
+            # Предварительный AGC для слабых сигналов перед поиском преамбулы
+            signal_rms = np.sqrt(np.mean(buf**2))
+            print(f"[AGC-PRE-LIVE] До AGC: signal_rms={signal_rms:.6f}")
+            if signal_rms > 0:
+                buf = buf * (TARGET_RMS / signal_rms)
+                print(f"[AGC-PRE-LIVE] После AGC: target={TARGET_RMS}, gain={TARGET_RMS/signal_rms:.3f}, новый RMS={np.sqrt(np.mean(buf**2)):.6f}")
+            
             corr_full = np.correlate(buf, preamble_td_local, mode='valid')
             energy = np.convolve(buf * buf, np.ones(pre_len)[::-1], mode='valid')
             denom = np.sqrt(energy * np.sum(preamble_td_local * preamble_td_local))
@@ -619,7 +634,13 @@ def live_receive_and_process():
             peak_idx = int(np.argmax(norm_corr))
             peak_val = float(norm_corr[peak_idx])
             
-            if peak_val < 0.35:
+            # Вычисляем уровень шума как медиану корреляции
+            noise_floor = np.median(norm_corr)  # Медиана корреляции (шум)
+            threshold = noise_floor * 5.0  # Порог в 5 раз выше шума
+            print(f"[SYNC] noise_floor={noise_floor:.6f}, threshold={threshold:.6f}, peak_val={peak_val:.6f}")
+            
+            if peak_val < threshold:
+                print(f"[SYNC] skip: peak {peak_val:.3f} < threshold {threshold:.3f}")
                 time.sleep(0.02)
                 continue
             

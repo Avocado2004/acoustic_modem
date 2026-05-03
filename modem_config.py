@@ -129,14 +129,14 @@ GAP_OFDM_SYMBOLS = 0
 SYMBOL_LEN = Nfft + Ncp
 GAP_SAMPLES_DEFAULT = GAP_OFDM_SYMBOLS * SYMBOL_LEN
 # ширина окна поиска кандидата (в отсчетах) — полуширина окна вокруг pref_abs
-SYNC_WINDOW_HALF = 20  # можно изменить (типично Ncp или SYMBOL_LEN//2)
+SYNC_WINDOW_HALF = 100  # увеличено для устойчивости к эхо и сдвигам
 
 # limit diagnostic RS_FAIL prints globally per receive to avoid flood
 _MAX_RS_FAIL_PRINTS_GLOBAL = 1
 
 # --- PACKET-LEVEL AGC (insert after cand chosen, before pkt_data_start computation) ---
 # параметры AGC
-TARGET_RMS = 0.5    # целевой RMS для полезной части пакета (подберите экспериментально)
+TARGET_RMS = 0.3    # целевой RMS для полезной части пакета (уменьшено для лучшей работы со слабыми сигналами)
 MIN_RMS = 1e-12
 # параметры символьного AGC
 SYMBOL_TARGET_RMS = 0.5  # Целевой RMS для OFDM символа (передача и прием)

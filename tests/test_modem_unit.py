@@ -326,16 +326,16 @@ class TestOFDMFunctions:
     def test_build_preamble(self):
         """Test preamble generation."""
         preamble = build_preamble(reps=1, zc_root=1)
-        # Should be 4 OFDM symbols
-        expected_len = 4 * (Nfft + Ncp)
+        # Should be 18 OFDM symbols (16 ZC + 2 pilot)
+        expected_len = 18 * (Nfft + Ncp)
         assert len(preamble) == expected_len
 
     def test_build_preamble_custom_reps(self):
         """Test preamble with custom repetitions."""
         preamble = build_preamble(reps=2, zc_root=1)
-        # Note: build_preamble always uses 4 symbols regardless of reps
+        # Note: build_preamble always uses 18 symbols (16 ZC + 2 pilot)
         # (reps parameter is not actually used in the function)
-        expected_len = 4 * (Nfft + Ncp)
+        expected_len = 18 * (Nfft + Ncp)
         assert len(preamble) == expected_len
 
     def test_zc_root_sequence(self):

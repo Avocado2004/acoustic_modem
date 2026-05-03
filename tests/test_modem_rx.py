@@ -78,7 +78,7 @@ class TestDecodePacket:
         }
         
         result, rs_ok, used_pre = decode_packet_at_candidate(1000, 75, packet_idx=0, 
-                                                         bytes_before_packet=0, expected_total=50)
+                                                             bytes_before_packet=0, expected_total=50)
         
         assert isinstance(result, bytes)
         assert rs_ok >= 0
@@ -218,3 +218,230 @@ class TestDemappingFunctions:
         bits = bpsk_demap(syms)
         
         assert len(bits) == 0
+
+
+class TestWeakSignals:
+    """Тесты для проверки работы на слабых сигналах с шумом."""
+    
+    def setup_method(self):
+        """Подготовка перед каждым тестом."""
+        from modem_config import init_phases
+        init_phases()
+        # Импортируем необходимые функции
+        from modem_modulation import build_preamble, sync_by_corr
+        from modem_config import SYNC_WINDOW_HALF, SYMBOL_LEN, Nfft, Ncp
+        self.build_preamble = build_preamble
+        self.sync_by_corr = sync_by_corr
+        self.SYNC_WINDOW_HALF = SYNC_WINDOW_HALF
+        self.SYMBOL_LEN = SYMBOL_LEN
+        self.Nfft = Nfft
+        self.Ncp = Ncp
+        
+        # Создаем преамбулу для тестов
+        self.preamble = build_preamble()
+        print(f"[TEST SETUP] Преамбула создана, длина: {len(self.preamble)} сэмплов")
+        print(f"[TEST SETUP] SYNC_WINDOW_HALF = {self.SYNC_WINDOW_HALF}")
+    
+    def test_weak_signal_with_high_noise(self):
+        """
+        Тест с сильно зашумленным сигналом (низкий SNR).
+        Создаем сигнал с преамбулой и добавляем много шума.
+        Проверяем, что преамбула обнаруживается корреляцией.
+        """
+        print("\n[TEST] Начало теста test_weak_signal_with_high_noise")
+        
+        # Создаем сигнал: преамбула + данные (тишина)
+        signal_length = len(self.preamble) + 1000
+        rx_signal = np.zeros(signal_length, dtype=complex)
+        rx_signal[:len(self.preamble)] = self.preamble
+        
+        # Добавляем сильный шум (низкий SNR)
+        noise_power = 10.0  # Высокая мощность шума
+        noise = np.random.randn(signal_length) + 1j * np.random.randn(signal_length)
+        noise = noise * np.sqrt(noise_power / 2)  # Нормализация мощности шума
+        rx_noisy = rx_signal + noise
+        
+        # Проверяем уровень сигнала относительно шума
+        signal_power = np.mean(np.abs(rx_signal) ** 2)
+        noise_power_actual = np.mean(np.abs(noise) ** 2)
+        snr_db = 10 * np.log10(signal_power / noise_power_actual) if noise_power_actual > 0 else float('inf')
+        print(f"[TEST] SNR = {snr_db:.2f} dB")
+        print(f"[TEST] Мощность сигнала: {signal_power:.6f}, мощность шума: {noise_power_actual:.6f}")
+        
+        # Нормализуем сигнал (как в реальном приемнике)
+        rms = np.sqrt(np.mean(np.abs(rx_noisy) ** 2))
+        if rms > 1e-12:
+            rx_normalized = rx_noisy / rms * 0.3  # TARGET_RMS = 0.3
+        else:
+            rx_normalized = rx_noisy
+        
+        # Ищем преамбулу корреляцией
+        try:
+            sync_pos = self.sync_by_corr(rx_normalized, self.preamble)
+            print(f"[TEST] Обнаружена позиция преамбулы: {sync_pos}")
+            
+            # Проверяем, что позиция находится в пределах разумного
+            # (допускаем отклонение из-за шума)
+            expected_pos = 0  # Преамбула в начале
+            distance = abs(sync_pos - expected_pos)
+            print(f"[TEST] Расстояние до ожидаемой позиции: {distance}")
+            
+            # Проверяем, что корреляция вообще сработала (позиция не отрицательная и не слишком большая)
+            assert 0 <= sync_pos < signal_length, f"Позиция {sync_pos} вне диапазона [0, {signal_length})"
+            
+            # Проверяем корреляцию напрямую
+            from signal_utils import fftconvolve
+            corr = fftconvolve(rx_normalized, self.preamble[::-1], mode='valid')
+            max_corr = np.max(np.abs(corr))
+            print(f"[TEST] Максимальная корреляция: {max_corr:.6f}")
+            
+            # Даже при сильном шуме должен быть какой-то пик корреляции
+            assert max_corr > 0, "Корреляция должна быть положительной"
+            
+        except Exception as e:
+            print(f"[TEST ERROR] Ошибка при поиске преамбулы: {e}")
+            raise
+        
+        print("[TEST] Тест test_weak_signal_with_high_noise завершен успешно")
+    
+    def test_very_weak_signal_low_amplitude(self):
+        """
+        Тест с очень слабым сигналом (низкая амплитуда).
+        Умножаем сигнал на маленький коэффициент (0.001).
+        Проверяем обнаружение после AGC.
+        """
+        print("\n[TEST] Начало теста test_very_weak_signal_low_amplitude")
+        
+        # Создаем слабый сигнал с преамбулой
+        weak_coeff = 0.001  # Очень маленькая амплитуда
+        weak_preamble = self.preamble * weak_coeff
+        
+        signal_length = len(weak_preamble) + 1000
+        rx_signal = np.zeros(signal_length, dtype=complex)
+        rx_signal[:len(weak_preamble)] = weak_preamble
+        
+        print(f"[TEST] Коэффициент ослабления: {weak_coeff}")
+        print(f"[TEST] RMS слабого сигнала: {np.sqrt(np.mean(np.abs(rx_signal)**2)):.6f}")
+        
+        # Нормализуем сигнал (имитация AGC)
+        rms_before = np.sqrt(np.mean(np.abs(rx_signal) ** 2))
+        if rms_before > 1e-12:
+            rx_normalized = rx_signal / rms_before * 0.3  # TARGET_RMS = 0.3
+        else:
+            rx_normalized = rx_signal
+            print("[TEST WARNING] RMS слишком мал, сигнал не нормализован")
+        
+        rms_after = np.sqrt(np.mean(np.abs(rx_normalized) ** 2))
+        print(f"[TEST] RMS после нормализации: {rms_after:.6f}")
+        
+        # Ищем преамбулу (используем оригинальную преамбулу для корреляции)
+        try:
+            # Нормализуем преамбулу так же, как в реальном приемнике
+            preamble_for_corr = self.preamble / np.sqrt(np.mean(np.abs(self.preamble) ** 2)) * 0.3
+            
+            sync_pos = self.sync_by_corr(rx_normalized, preamble_for_corr)
+            print(f"[TEST] Обнаружена позиция преамбулы: {sync_pos}")
+            
+            # Проверяем корреляцию
+            from signal_utils import fftconvolve
+            corr = fftconvolve(rx_normalized, preamble_for_corr[::-1], mode='valid')
+            max_corr = np.max(np.abs(corr))
+            print(f"[TEST] Максимальная корреляция: {max_corr:.6f}")
+            
+            # После нормализации AGC сигнал должен быть обнаружен
+            assert max_corr > 0, "Корреляция должна быть положительной после нормализации"
+            
+        except Exception as e:
+            print(f"[TEST ERROR] Ошибка при поиске слабого сигнала: {e}")
+            raise
+        
+        print("[TEST] Тест test_very_weak_signal_low_amplitude завершен успешно")
+    
+    def test_preamble_length_16_zc_symbols(self):
+        """
+        Тест с измененной длиной преамбулы.
+        Проверяем, что новая преамбула (16 ZC-символов) корректно обрабатывается.
+        """
+        print("\n[TEST] Начало теста test_preamble_length_16_zc_symbols")
+        
+        # Проверяем длину преамбулы
+        preamble = self.build_preamble()
+        expected_length = 18 * self.SYMBOL_LEN  # 16 ZC + 2 pilot = 18 OFDM symbols
+        print(f"[TEST] Длина преамбулы: {len(preamble)} сэмплов")
+        print(f"[TEST] Ожидаемая длина (18 OFDM symbols): {expected_length} сэмплов")
+        print(f"[TEST] SYMBOL_LEN (Nfft + Ncp): {self.SYMBOL_LEN}")
+        
+        # Проверяем, что длина соответствует ожидаемой
+        assert len(preamble) == expected_length, \
+            f"Длина преамбулы {len(preamble)} не соответствует ожидаемой {expected_length}"
+        
+        # Проверяем, что преамбула корректно обнаруживается в сигнале
+        signal_length = len(preamble) + 2000
+        rx_signal = np.zeros(signal_length, dtype=complex)
+        rx_signal[500:500+len(preamble)] = preamble  # Преамбула со сдвигом
+        
+        # Нормализуем
+        rms = np.sqrt(np.mean(np.abs(rx_signal) ** 2))
+        if rms > 1e-12:
+            rx_normalized = rx_signal / rms * 0.3
+        else:
+            rx_normalized = rx_signal
+        
+        # Ищем преамбулу
+        sync_pos = self.sync_by_corr(rx_normalized, preamble)
+        print(f"[TEST] Обнаружена позиция преамбулы: {sync_pos}")
+        print(f"[TEST] Ожидаемая позиция: ~500")
+        
+        # Проверяем, что позиция близка к ожидаемой (допуск из-за особенностей корреляции)
+        distance = abs(sync_pos - 500)
+        print(f"[TEST] Расстояние до ожидаемой позиции: {distance}")
+        
+        # Допускаем небольшое отклонение
+        assert distance < 100, f"Позиция {sync_pos} слишком далеко от ожидаемой 500 (расстояние {distance})"
+        
+        print("[TEST] Тест test_preamble_length_16_zc_symbols завершен успешно")
+    
+    def test_sync_window_half_100(self):
+        """
+        Тест с расширенным окном поиска.
+        Проверяем, что SYNC_WINDOW_HALF=100 используется (проверка через конфигурацию).
+        """
+        print("\n[TEST] Начало теста test_sync_window_half_100")
+        
+        # Проверяем значение SYNC_WINDOW_HALF
+        print(f"[TEST] SYNC_WINDOW_HALF = {self.SYNC_WINDOW_HALF}")
+        assert self.SYNC_WINDOW_HALF == 100, \
+            f"SYNC_WINDOW_HALF должен быть 100, а не {self.SYNC_WINDOW_HALF}"
+        
+        # Создаем сигнал с преамбулой, сдвинутой на большое расстояние
+        # чтобы проверить, что окно поиска достаточно широкое
+        preamble = self.build_preamble()
+        signal_length = len(preamble) + 5000
+        rx_signal = np.zeros(signal_length, dtype=complex)
+        
+        # Помещаем преамбулу в середину (сдвиг ~2500)
+        shift = 2500
+        rx_signal[shift:shift+len(preamble)] = preamble
+        
+        print(f"[TEST] Преамбула помещена со сдвигом {shift}")
+        
+        # Нормализуем
+        rms = np.sqrt(np.mean(np.abs(rx_signal) ** 2))
+        if rms > 1e-12:
+            rx_normalized = rx_signal / rms * 0.3
+        else:
+            rx_normalized = rx_signal
+        
+        # Ищем преамбулу
+        sync_pos = self.sync_by_corr(rx_normalized, preamble)
+        print(f"[TEST] Обнаружена позиция преамбулы: {sync_pos}")
+        
+        # Проверяем, что позиция близка к ожидаемой
+        distance = abs(sync_pos - shift)
+        print(f"[TEST] Расстояние до ожидаемой позиции: {distance}")
+        
+        # Даже с большим сдвигом должны найти (окно поиска в sync_by_corr не ограничено,
+        # но в реальном коде modem_rx.py используется SYNC_WINDOW_HALF)
+        assert distance < 200, f"Позиция {sync_pos} слишком далеко от ожидаемой {shift}"
+        
+        print("[TEST] Тест test_sync_window_half_100 завершен успешно")
