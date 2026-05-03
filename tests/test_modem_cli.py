@@ -22,7 +22,8 @@ class TestRunTransmit:
         """Тест режима передачи текста."""
         mock_transmit_text.return_value = True
         
-        with patch('builtins.input', side_effect=['T', 'Test text']):
+        # Добавляем выбор модуляции (Q - QPSK по умолчанию)
+        with patch('builtins.input', side_effect=['T', 'Q', 'Test text']):
             run_transmit()
             mock_transmit_text.assert_called_once_with('Test text')
     
@@ -31,7 +32,7 @@ class TestRunTransmit:
         """Тест режима передачи файла."""
         mock_transmit_file.return_value = True
         
-        with patch('builtins.input', side_effect=['F', '/path/to/file']):
+        with patch('builtins.input', side_effect=['F', 'Q', '/path/to/file']):
             run_transmit()
             mock_transmit_file.assert_called_once_with('/path/to/file')
     
@@ -41,9 +42,18 @@ class TestRunTransmit:
         mock_transmit_file.return_value = True
         
         # Если введено что-то другое, должно быть F
-        with patch('builtins.input', side_effect=['X', '/path/to/file']):
+        with patch('builtins.input', side_effect=['X', 'Q', '/path/to/file']):
             run_transmit()
             mock_transmit_file.assert_called_once_with('/path/to/file')
+    
+    @patch('modem_cli.transmit_text')
+    def test_transmit_bpsk_mode(self, mock_transmit_text):
+        """Тест передачи текста с модуляцией BPSK."""
+        mock_transmit_text.return_value = True
+        
+        with patch('builtins.input', side_effect=['T', 'B', 'Test text']):
+            run_transmit()
+            mock_transmit_text.assert_called_once_with('Test text')
 
 
 class TestRunReceive:
@@ -93,7 +103,7 @@ class TestMain:
     @patch('modem_cli.build_preamble')
     def test_main_transmit_mode(self, mock_build_preamble, mock_init_phases, mock_run_transmit):
         """Тест main в режиме передачи."""
-        with patch('builtins.input', side_effect=['T']):
+        with patch('builtins.input', side_effect=['T', 'Q']):
             main()
             mock_init_phases.assert_called_once()
             mock_build_preamble.assert_called_once()
@@ -121,12 +131,12 @@ class TestMain:
             mock_build_preamble.assert_called_once()
             mock_run_loop.assert_called_once()
     
-    @patch('modem_cli.run_transmit')  # По умолчанию T
+    @patch('modem_cli.run_transmit')
     @patch('modem_cli.init_phases')
     @patch('modem_cli.build_preamble')
     def test_main_default_mode(self, mock_build_preamble, mock_init_phases, mock_run_transmit):
         """Тест main с режимом по умолчанию."""
-        with patch('builtins.input', side_effect=['']):  # Пустой ввод -> T
+        with patch('builtins.input', side_effect=['']):
             main()
             mock_init_phases.assert_called_once()
             mock_build_preamble.assert_called_once()

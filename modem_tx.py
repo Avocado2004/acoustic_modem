@@ -9,15 +9,14 @@ import struct
 import zlib
 import modem_config
 from modem_config import (fs, Nfft, Ncp, Nsub, subc_inds,
-                          DEFAULT_PACKET_BLOCKS, GAP_OFDM_SYMBOLS, SYMBOL_LEN,
-                          GAP_SAMPLES_DEFAULT, MAX_PAYLOAD_SIZE, RS_DATA_BYTES,
-                          RS_CW_BYTES, RS_CW_BITS, rs, SYMBOL_TX_TARGET,
-                          TARGET_RMS, MIN_RMS, SYMBOL_TARGET_RMS, AGC_ALPHA,
-                          AGC_DEBUG, PLOTTING_AVAILABLE, plt,
-                          BITS_PER_OFDM_SYMBOL)
+                           DEFAULT_PACKET_BLOCKS, GAP_OFDM_SYMBOLS, SYMBOL_LEN,
+                           GAP_SAMPLES_DEFAULT, MAX_PAYLOAD_SIZE, RS_DATA_BYTES,
+                           RS_CW_BYTES, RS_CW_BITS, rs, SYMBOL_TX_TARGET,
+                           TARGET_RMS, MIN_RMS, SYMBOL_TARGET_RMS, AGC_ALPHA,
+                           AGC_DEBUG, PLOTTING_AVAILABLE, plt)
 from modem_modulation import (qpsk_map, bpsk_map, bytes_to_bits, bits_to_bytes,
-                              ofdm_symbol, build_preamble, build_data_td, zc_root_sequence,
-                              interleave_bits)
+                               ofdm_symbol, build_preamble, build_data_td, zc_root_sequence,
+                               interleave_bits)
 from modem_packet import build_header, make_packet_header_bytes, simulate_packet_positions 
 
 
@@ -109,9 +108,17 @@ def transmit_file(file_path, packet_blocks=DEFAULT_PACKET_BLOCKS):
 
 
 def _transmit_data(data_bytes, total_data_len, filename_bytes, mode='T', packet_blocks=DEFAULT_PACKET_BLOCKS):
-    """Внутренняя функция передачи данных."""
+    """Внутренняя функция передачи данных.
+    
+    packet_blocks - количество ЛОГИЧЕСКИХ блоков в пакете.
+    Для QPSK: 1 логический блок = 1 физический OFDM символ.
+    Для BPSK: 1 логический блок = OFDM_SYMBOLS_PER_BLOCK (2) физических OFDM символов.
+    """
     # TX params
-    OFDM_BLOCKS_PER_PACKET = packet_blocks
+    LOGICAL_BLOCKS_PER_PACKET = packet_blocks
+    # Переводим логические блоки в физические OFDM символы
+    physical_symbols_per_packet = LOGICAL_BLOCKS_PER_PACKET * modem_config.OFDM_SYMBOLS_PER_BLOCK
+    
     gap_ofdm_symbols = GAP_OFDM_SYMBOLS
     symbol_len_samples = SYMBOL_LEN
     gap_samples = gap_ofdm_symbols * symbol_len_samples
@@ -144,7 +151,10 @@ def _transmit_data(data_bytes, total_data_len, filename_bytes, mode='T', packet_
             header_bytes = transmission_header + transmission_header + transmission_header
         else:
             header_bytes = make_packet_header_bytes(packet_no, tx_type_bits)
-        allowed_blocks = OFDM_BLOCKS_PER_PACKET
+        
+        # allowed_physical_symbols - максимальное количество физических символов в пакете
+        allowed_physical_symbols = physical_symbols_per_packet
+        
         lo = 0
         hi = len(remaining_data)
         best_sz = 0
@@ -152,43 +162,48 @@ def _transmit_data(data_bytes, total_data_len, filename_bytes, mode='T', packet_
         while lo <= hi:
             mid = (lo + hi) // 2
             test_bytes = header_bytes + remaining_data[:mid]
-            td_local, nblocks_local = _bytes_to_ofdm_blocks_bytes(test_bytes)
-            if nblocks_local <= allowed_blocks:
+            td_local, n_physical_symbols = _bytes_to_ofdm_blocks_bytes(test_bytes)
+            # Сравниваем физические символы с допустимым количеством
+            if n_physical_symbols <= allowed_physical_symbols:
                 best_sz = mid
                 best_td = td_local
                 lo = mid + 1
             else:
                 hi = mid - 1
+                
         if best_td is None:
             best_sz = 0
-            td_local, nblocks_local = _bytes_to_ofdm_blocks_bytes(header_bytes)
-            if nblocks_local > allowed_blocks:
-                samples_keep = allowed_blocks * symbol_len_samples
+            td_local, n_physical_symbols = _bytes_to_ofdm_blocks_bytes(header_bytes)
+            if n_physical_symbols > allowed_physical_symbols:
+                samples_keep = allowed_physical_symbols * symbol_len_samples
                 td_local = td_local[:samples_keep]
             best_td = td_local
 
         td_now = best_td
         if SYMBOL_LEN <= 0:
-            nblocks_now = 0
+            n_physical_now = 0
         else:
-            nblocks_now = len(td_now) // SYMBOL_LEN
-        if nblocks_now < allowed_blocks:
-            needed_blocks = allowed_blocks - nblocks_now
-            filler_bytes_len = needed_blocks * RS_DATA_BYTES
+            n_physical_now = len(td_now) // SYMBOL_LEN
+            
+        # Дополняем пакет до полного размера (в физических символах)
+        if n_physical_now < allowed_physical_symbols:
+            needed_physical_symbols = allowed_physical_symbols - n_physical_now
+            filler_bytes_len = needed_physical_symbols * RS_DATA_BYTES
             td_filler, nblk_f = _bytes_to_ofdm_blocks_bytes(b'\x00' * filler_bytes_len)
-            if nblk_f >= needed_blocks and len(td_filler) >= needed_blocks * SYMBOL_LEN:
-                td_now = np.concatenate((td_now, td_filler[:needed_blocks * SYMBOL_LEN]))
-                nblocks_now = allowed_blocks
+            if nblk_f >= needed_physical_symbols and len(td_filler) >= needed_physical_symbols * SYMBOL_LEN:
+                td_now = np.concatenate((td_now, td_filler[:needed_physical_symbols * SYMBOL_LEN]))
+                n_physical_now = allowed_physical_symbols
             else:
-                pad_samples = needed_blocks * SYMBOL_LEN
+                pad_samples = needed_physical_symbols * SYMBOL_LEN
                 td_now = np.concatenate((td_now, np.zeros(pad_samples, dtype=td_now.dtype)))
-                nblocks_now = allowed_blocks
-        elif nblocks_now > allowed_blocks:
-            td_now = td_now[:allowed_blocks * SYMBOL_LEN]
-            nblocks_now = allowed_blocks
+                n_physical_now = allowed_physical_symbols
+        elif n_physical_now > allowed_physical_symbols:
+            td_now = td_now[:allowed_physical_symbols * SYMBOL_LEN]
+            n_physical_now = allowed_physical_symbols
 
-        nblocks_sent_est = nblocks_now
-        print(f"[TX-DBG] packet_no={packet_no} is_first={is_first} payload_bytes={best_sz} nblocks_est={nblocks_sent_est} header_first16={header_bytes[:16].hex()}")
+        # Для отладки: вычисляем, сколько логических блоков мы отправили
+        n_logical_sent = n_physical_now // modem_config.OFDM_SYMBOLS_PER_BLOCK
+        print(f"[TX-DBG] packet_no={packet_no} is_first={is_first} payload_bytes={best_sz} physical_symbols={n_physical_now} logical_blocks={n_logical_sent} header_first16={header_bytes[:16].hex()}")
 
         preamble = build_preamble()
         packet_samples = np.concatenate((preamble, td_now)) if len(td_now) > 0 else preamble.copy()
@@ -295,7 +310,25 @@ def _transmit_data(data_bytes, total_data_len, filename_bytes, mode='T', packet_
 
 
 def _bytes_to_ofdm_blocks_bytes(bstream: bytes):
-    """Вспомогательная функция для передачи: разбивка потока байт на блоки OFDM."""
+    """
+    Вспомогательная функция для передачи: разбивка потока байт на блоки OFDM.
+    
+    Алгоритм:
+    1. Разбивает поток байт на блоки по RS_DATA_BYTES (8 байт)
+    2. Дополняет последний блок нулями, если он неполный
+    3. Применяет RS-кодирование к каждому блоку (получаем 12 байт = 96 бит на блок)
+    4. Преобразует байты в биты
+    5. Применяет интерливинг для повышения устойчивости к пачкам ошибок
+    
+    Возвращает (time_domain_samples, n_physical_symbols):
+    - time_domain_samples: сигнал во временной области
+    - n_physical_symbols: количество ФИЗИЧЕСКИХ OFDM символов
+    
+    Особенность для BPSK:
+    - BPSK: 1 бит на поднесущую, 48 поднесущих = 48 бит/OFDM символ
+    - Для формирования одного RS слова (96 бит) требуется 2 OFDM символа BPSK
+    - Интерливинг работает с block_size=BITS_PER_OFDM_SYMBOL (48 для BPSK, 96 для QPSK)
+    """
     if len(bstream) == 0:
         return np.array([], dtype=float), 0
     blocks_local = [bstream[i:i+RS_DATA_BYTES] for i in range(0, len(bstream), RS_DATA_BYTES)]
@@ -303,14 +336,15 @@ def _bytes_to_ofdm_blocks_bytes(bstream: bytes):
         blocks_local[-1] += b'\x00' * (RS_DATA_BYTES - len(blocks_local[-1]))
     encoded = [rs.encode(b) for b in blocks_local]
     bits_blocks_local = [bytes_to_bits(b) for b in encoded]
-
+    
     data_bits_local = np.concatenate(bits_blocks_local) if len(bits_blocks_local) > 0 else np.array([], dtype=int)
-    
     # Применяем интерливинг для повышения устойчивости к пачкам ошибок
-    data_bits_local = interleave_bits(data_bits_local, block_size=BITS_PER_OFDM_SYMBOL)
+    # block_size равен BITS_PER_OFDM_SYMBOL (48 для BPSK, 96 для QPSK)
+    data_bits_local = interleave_bits(data_bits_local, block_size=modem_config.BITS_PER_OFDM_SYMBOL)
     
-    td_local, nblocks_local = build_data_td(data_bits_local) if data_bits_local.size > 0 else (np.array([], dtype=float), 0)
-    return td_local, nblocks_local
+    
+    td_local, n_physical_symbols = build_data_td(data_bits_local) if data_bits_local.size > 0 else (np.array([], dtype=float), 0)
+    return td_local, n_physical_symbols
 
 # Alias for backward compatibility with tests
 bytes_to_ofdm_blocks_bytes = _bytes_to_ofdm_blocks_bytes

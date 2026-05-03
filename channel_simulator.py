@@ -1,8 +1,8 @@
 """
 channel_simulator.py
 
-Модуль для симуляции различных помех и искажений в акустическом канале связи.
-Используется для тестирования модема (например, test_modem_simple.py) без изменения его кода.
+Модуль для симуляции различних помех і искажень в акустичному каналі зв'язку.
+Використовується для тестування модема (наприклад, test_modem_simple.py) без зміни його коду.
 """
 
 import numpy as np
@@ -11,16 +11,38 @@ from typing import Optional, List
 
 class ChannelSimulator:
     """
-    Класс для симуляции канала связи.
-    Позволяет добавлять шум, многолучевость, джиттер и сдвиг фаз.
+    Клас для симуляції каналу зв'язку.
+    Дозволяє додавати шум, багатопроменевість, джитер і зсув фаз.
     """
     
     def __init__(self, fs: int = 48000, seed: Optional[int] = None):
+        """
+        Ініціалізація симулятора каналу.
+        
+        Параметри:
+        - fs: частота дискретизації
+        - seed: seed для генератора випадкових чисел
+        """
         self.fs = fs
         self.rng = np.random.RandomState(seed)
+        # Зберігаємо згенеровану АЧХ для забезпечення постійності протягом сеансу
+        self._current_freq_response = None
+        # Зберігаємо параметри останнього виклику для відлагодження
+        self._last_distance_m = None
+        self._last_percent = None
+        
+    def reset_channel_state(self):
+        """
+        Скидає збережену АЧХ при ініціалізації нового сеансу.
+        Викликається перед початком нової симуляції.
+        """
+        self._current_freq_response = None
+        self._last_distance_m = None
+        self._last_percent = None
+        print("[CHANNEL] Стан каналу скинуто")
         
     def add_awgn(self, sig: np.ndarray, snr_db: float) -> np.ndarray:
-        """Добавляет белый гауссовский шум (AWGN) к сигналу."""
+        """Додає білий гауссівський шум (AWGN) до сигналу."""
         if snr_db is None or snr_db <= -np.inf:
             return sig.copy()
         
@@ -38,7 +60,7 @@ class ChannelSimulator:
     def apply_multipath(self, sig: np.ndarray, 
                         delays_ms: List[float], 
                         gains: List[float]) -> np.ndarray:
-        """Применяет модель многолучевого распространения (Multipath)."""
+        """Застосовує модель багатопроменевого поширення (Multipath)."""
         if len(delays_ms) != len(gains):
             raise ValueError("delays_ms and gains must have the same length")
             
@@ -54,7 +76,7 @@ class ChannelSimulator:
         return out
 
     def apply_frequency_offset(self, sig: np.ndarray, offset_hz: float) -> np.ndarray:
-        """Вносит сдвиг частоты (Доплеровский сдвиг)."""
+        """Вносить зсув частоти (Доплерівський зсув)."""
         if offset_hz == 0:
             return sig.copy()
             
@@ -62,7 +84,7 @@ class ChannelSimulator:
         return np.real(sig * np.exp(1j * 2.0 * np.pi * offset_hz * t))
 
     def apply_phase_jitter(self, sig: np.ndarray, jitter_std_rad: float) -> np.ndarray:
-        """Вносит случайный шум фазы (Phase Jitter)."""
+        """Вносить випадковий шум фази (Phase Jitter)."""
         if jitter_std_rad == 0:
             return sig.copy()
             
@@ -70,7 +92,7 @@ class ChannelSimulator:
         return sig * np.exp(1j * phase_noise)
 
     def apply_sample_jitter(self, sig: np.ndarray, jitter_ms: float) -> np.ndarray:
-        """Симулирует джиттер семплов (нестабильность тактового генератора)."""
+        """Симулює джиттер семплів (нестабільність тактового генератора)."""
         if jitter_ms <= 0:
             return sig.copy()
             
@@ -86,7 +108,7 @@ class ChannelSimulator:
     def apply_fading(self, sig: np.ndarray, 
                      fader_type: str = 'rayleigh', 
                      block_size: int = 512) -> np.ndarray:
-        """Симулирует замирания (Fading)."""
+        """Симулює замирання (Fading)."""
         out = np.zeros_like(sig)
         num_blocks = int(np.ceil(len(sig) / block_size))
         
@@ -104,12 +126,12 @@ class ChannelSimulator:
         return out
 
     def apply_hard_clipping(self, sig: np.ndarray, threshold: float) -> np.ndarray:
-        """Применяет жесткое ограничение (hard clipping) сигнала."""
+        """Застосовує жорстке обмеження (hard clipping) сигналу."""
         return np.clip(sig, -threshold, threshold)
 
     def apply_soft_clipping(self, sig: np.ndarray, threshold: float, 
                            clip_type: str = 'tanh') -> np.ndarray:
-        """Применяет мягкое ограничение (soft clipping) сигнала."""
+        """Застосовує м'яке обмеження (soft clipping) сигналу."""
         if clip_type == 'tanh':
             return threshold * np.tanh(sig / threshold)
         elif clip_type == 'cubic':
@@ -126,7 +148,7 @@ class ChannelSimulator:
     def apply_distortion(self, sig: np.ndarray, 
                         drive: float = 1.0, 
                         type: str = 'even') -> np.ndarray:
-        """Применяет нелинейные искажения (distortion)."""
+        """Застосовує нелінійні спотворення (distortion)."""
         max_val = np.max(np.abs(sig))
         if max_val < 1e-15:
             return sig.copy()
@@ -148,7 +170,7 @@ class ChannelSimulator:
                                    ratio: float = 4.0,
                                    attack_ms: float = 1.0,
                                    release_ms: float = 10.0) -> np.ndarray:
-        """Симулирует компрессию амплитуды (audio compressor)."""
+        """Симулює компресію амплітуди (audio compressor)."""
         attack_coeff = np.exp(-1.0 / (attack_ms * self.fs / 1000.0))
         release_coeff = np.exp(-1.0 / (release_ms * self.fs / 1000.0))
         
@@ -172,56 +194,136 @@ class ChannelSimulator:
         return compressed
 
     def apply_random_frequency_response(self, sig: np.ndarray, 
+                                       percent: float = 0.0,
                                        f_low: float = 300.0, 
                                        f_high: float = 5000.0,
                                        smoothness: int = 15) -> np.ndarray:
-        """Применяет случайную частотную характеристику канала в заданной полосе частот."""
+        """
+        Застосовує випадкову частотну характеристику (АЧХ) каналу в заданій смузі частот.
+        
+        Параметри:
+        - sig: вхідний сигнал
+        - percent: відсоток спотворень (0-100), керує інтенсивність АЧХ
+        - f_low: нижня межа смуги частот (Гц)
+        - f_high: верхня межа смуги частот (Гц)
+        - smoothness: ступінь згладжування АЧХ
+        
+        Повертає:
+        - сигнал з застосованою АЧХ
+        """
         n = len(sig)
         freqs = np.fft.rfftfreq(n, 1.0 / self.fs)
         spec = np.fft.rfft(sig)
         
-        mask = (freqs >= f_low) & (freqs <= f_high)
-        random_response = np.ones_like(freqs, dtype=np.float64)
+        # Якщо percent = 0, повертаємо сигнал без змін (рівна АЧХ)
+        if percent == 0.0:
+            print("[CHANNEL] АЧХ рівна (percent=0%)")
+            return sig.copy()
         
-        if np.any(mask):
-            raw_random = self.rng.uniform(0.3, 1.7, size=np.sum(mask))
-            if smoothness > 1 and len(raw_random) > smoothness:
-                kernel = np.ones(smoothness) / smoothness
-                raw_random = np.convolve(raw_random, kernel, mode='same')
-            random_response[mask] = raw_random
+        # Генеруємо АЧХ один раз за сеанс, якщо ще не згенерована
+        if self._current_freq_response is None or self._last_percent != percent:
+            print(f"[CHANNEL] Генерація нової АЧХ для percent={percent}%...")
+            
+            # Масштабуємо діапазон АЧХ від 0% (рівна) до 100% (±12 дБ)
+            max_db_range = 12.0  # максимальне відхилення в дБ
+            db_range = (percent / 100.0) * max_db_range
+            
+            mask = (freqs >= f_low) & (freqs <= f_high)
+            random_response_db = np.zeros_like(freqs, dtype=np.float64)
+            
+            if np.any(mask):
+                # Генеруємо випадкову АЧХ в дБ в смузі частот
+                raw_random_db = self.rng.uniform(-db_range, db_range, size=np.sum(mask))
+                
+                # Згладжування для уникнення різких стрибків
+                if smoothness > 1 and len(raw_random_db) > smoothness:
+                    kernel = np.ones(smoothness) / smoothness
+                    raw_random_db = np.convolve(raw_random_db, kernel, mode='same')
+                
+                random_response_db[mask] = raw_random_db
+            
+            # Переведення з дБ у лінійний масштаб (для амплітуди)
+            random_response_linear = 10 ** (random_response_db / 20.0)
+            
+            # Зберігаємо згенеровану АЧХ для постійності в сеансі
+            self._current_freq_response = random_response_linear
+            self._last_percent = percent
+            
+            # Відлагоджувальний вивід
+            if np.any(mask):
+                db_values = random_response_db[mask]
+                print(f"[CHANNEL] АЧХ згенерована: діапазон {np.min(db_values):.2f}..{np.max(db_values):.2f} дБ, "
+                      f"середнє {np.mean(db_values):.2f} дБ")
+        else:
+            print(f"[CHANNEL] Використовуємо збережену АЧХ (percent={percent}%)")
         
-        spec_modified = spec * random_response
+        # Застосовуємо АЧХ до спектру
+        spec_modified = spec * self._current_freq_response
         return np.fft.irfft(spec_modified, n=n)
 
     def apply_distance_attenuation(self, sig: np.ndarray,
-                                  distance_m: float,
+                                  percent: float = 0.0,
                                   ref_distance: float = 1.0,
                                   air_absorption_db_per_m: float = 0.01) -> np.ndarray:
-        """Симулирует затухание сигнала при удалении динамика от микрофона."""
-        if distance_m <= 0:
+        """
+        Симулює затухання сигналу при віддаленні динаміка від мікрофона.
+        Зменшення рівня сигналу відбувається пропорційно 1/distance.
+        Високі частоти затухають сильніше низьких.
+        
+        Параметри:
+        - sig: вхідний сигнал
+        - percent: відсоток спотворень (0-100)
+                  0% -> відстань 1 м (практично немає затухання)
+                  100% -> відстань 5 м (максимальне затухання)
+        - ref_distance: опорна відстань (м)
+        - air_absorption_db_per_m: поглинання звуку повітрям (дБ/м)
+        
+        Повертає:
+        - сигнал з застосованим затуханням
+        """
+        # Розрахунок відстані від відсотка (1 м при 0%, 5 м при 100%)
+        distance_m = 1.0 + (5.0 - 1.0) * (percent / 100.0)
+        
+        # При 0% просто повертаємо копію сигналу (немає затухання)
+        if percent == 0.0:
+            print(f"[CHANNEL] Затухання: відстань={distance_m:.2f} м, без затухання (0%)")
             return sig.copy()
-            
+        
+        # Геометричне затухання: амплітуда зменшується пропорційно 1/distance
         geom_attenuation = (ref_distance / distance_m) ** 2
         
         n = len(sig)
         freqs = np.fft.rfftfreq(n, 1.0 / self.fs)
         spec = np.fft.rfft(sig)
         
-        f_norm = freqs / (self.fs / 2)
-        f0 = 0.5
-        base_curve = (f_norm - f0)**2
-        base_strength = 4.0
-        freq_attenuation = 1.0 + base_strength * base_curve
+        # Частотно-залежне затухання: високі частоти затухають сильніше
+        # Масштабуємо сили ефекту від 0 (при 0%) до максимуму (при 100%)
+        alpha = 4.0 * (percent / 100.0)  # сила частотної залежності
+        f_norm = freqs / (self.fs / 2)  # нормалізована частота [0, 1]
+        # Використовуємо монотонно зростаючу функцію від частоти
+        # freq_attenuation = 1.0 + alpha * f_norm (високі частоти мають більший коефіцієнт)
+        freq_attenuation = 1.0 + alpha * f_norm
         freq_attenuation = np.clip(freq_attenuation, 1.0, 10.0)
         
+        # Масштабуємо частотне затухання відстанню
         distance_factor = min(distance_m / 5.0, 10.0)
         freq_attenuation = 1.0 + (freq_attenuation - 1.0) * distance_factor
         
+        # Підсумкове затухання у частотній області
+        # Високі частоти мають більший freq_attenuation, тому ділення зменшує їх сильніше
         spec_attenuated = spec / freq_attenuation
+        
+        # Зворотне перетворення у часову область з урахуванням геометричного затухання
         result = np.fft.irfft(spec_attenuated, n=n) * geom_attenuation
         
+        # Поглинання звуку в повітрі
         air_attenuation_linear = 10 ** (-air_absorption_db_per_m * distance_m / 20.0)
         result *= air_attenuation_linear
+        
+        # Відлагоджувальний вивід
+        print(f"[CHANNEL] Затухання: відстань={distance_m:.2f} м, geom_factor={geom_attenuation:.4f}")
+        print(f"[CHANNEL]   Частотне затухання: alpha={alpha:.2f}, макс. freq_factor={np.max(freq_attenuation):.2f}")
+        print(f"[CHANNEL]   Рівень сигналу зменшено в {1.0/geom_attenuation:.1f} раз")
         
         return result.astype(sig.dtype)
 
@@ -231,13 +333,13 @@ class ChannelSimulator:
                             max_spacing_ms: float = 200.0,
                             impulse_duration_ms: float = 1.0) -> np.ndarray:
         """
-        Добавляет импульсные помехи (короткие импульсы белого шума).
+        Додає імпульсні перешкоди (короткі імпульси білого шуму).
         
-        Параметры:
-        - impulse_level: амплитуда импульсов шума (среднеквадратичное отклонение)
-        - min_spacing_ms: минимальное расстояние между импульсами в миллисекундах
-        - max_spacing_ms: максимальное расстояние между импульсами в миллисекундах
-        - impulse_duration_ms: длительность каждого импульса в миллисекундах
+        Параметри:
+        - impulse_level: амплітуда імпульсів шуму (середньоквадратичне відхилення)
+        - min_spacing_ms: мінімальна відстань між імпульсами в мілісекундах
+        - max_spacing_ms: максимальна відстань між імпульсами в мілісекундах
+        - impulse_duration_ms: тривалість кожного імпульсу в мілісекундах
         """
         result = sig.copy().astype(np.float64)
         n_samples = len(sig)
@@ -248,12 +350,12 @@ class ChannelSimulator:
         
         pos = 0
         while pos < n_samples:
-            # Генерируем импульс
+            # Генеруємо імпульс
             end_pos = min(pos + impulse_duration_samples, n_samples)
             noise = self.rng.normal(0, impulse_level, end_pos - pos)
             result[pos:end_pos] += noise
             
-            # Следующий интервал
+            # Наступний інтервал
             if min_spacing_samples >= max_spacing_samples:
                 next_interval = min_spacing_samples
             else:
@@ -272,7 +374,7 @@ def simulate_channel(sig: np.ndarray,
                      multipath_gains: Optional[List[float]] = None,
                      phase_jitter_rad: float = 0.0,
                      seed: Optional[int] = None) -> np.ndarray:
-    """Универсальная функция для применения набора искажений канала."""
+    """Універсальна функція для застосування набору спотворень каналу."""
     sim = ChannelSimulator(fs=fs, seed=seed)
     result = sig.copy()
     
@@ -295,7 +397,7 @@ def simulate_channel(sig: np.ndarray,
 
 
 if __name__ == "__main__":
-    print("Тестирование симулятора канала...")
+    print("Тестування симулятора каналу...")
     fs = 48000
     t = np.arange(0, 1.0, 1.0/fs)
     test_sig = np.sin(2 * np.pi * 1000 * t).astype(np.float32)
@@ -312,4 +414,4 @@ if __name__ == "__main__":
     
     print(f"Original RMS: {np.sqrt(np.mean(test_sig**2)):.4f}")
     print(f"Distorted RMS: {np.sqrt(np.mean(distorted**2)):.4f}")
-    print("Симулятор канала готов к использованию.")
+    print("Симулятор каналу готовий до використання.")

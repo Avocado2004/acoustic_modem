@@ -426,3 +426,79 @@ def plot_equalizer_dynamics(equalizer_history_list, subc_inds, fs, Nfft, title_p
         print(f"[PLOT] Error plotting equalizer dynamics: {e}")
 
 
+
+def plot_tx_diagrams(signal, fs, title_prefix="TX"):
+    """
+    Построить и сохранить диаграммы для переданного сигнала.
+    Сохраняет графики временной области, спектра и гистограммы амплитуд.
+    На мобильных платформах сохраняет данные в CSV вместо построения графиков.
+    """
+    if not PLOTTING_AVAILABLE or plt is None:
+        # На мобильных платформах или при отсутствии matplotlib сохраняем данные
+        try:
+            import numpy as np
+            # Сохраняем сигнал
+            data = np.column_stack((np.arange(len(signal)) / fs, signal))
+            fname = f"{title_prefix}_signal_data.csv"
+            np.savetxt(fname, data, delimiter=",", header="Time,Amplitude", comments="")
+            print(f"[PLOT] TX signal data saved to {fname}")
+            
+            # Сохраняем спектр
+            if len(signal) > 0:
+                freqs = np.fft.fftfreq(len(signal), 1.0/fs)
+                spectrum = np.abs(np.fft.fft(signal))
+                mask = freqs >= 0
+                data_spec = np.column_stack((freqs[mask], spectrum[mask]))
+                fname_spec = f"{title_prefix}_spectrum_data.csv"
+                np.savetxt(fname_spec, data_spec, delimiter=",", header="Frequency,Power", comments="")
+                print(f"[PLOT] TX spectrum data saved to {fname_spec}")
+        except Exception as e:
+            print(f"[PLOT] Failed to save TX data: {e}")
+        return
+    
+    try:
+        import numpy as np
+        
+        # 1. График сигнала во временной области
+        plt.figure(figsize=(10, 4))
+        t = np.arange(len(signal)) / fs
+        plt.plot(t, signal, linewidth=0.5)
+        plt.title(f"{title_prefix} Signal (Time Domain)")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Amplitude")
+        plt.grid(True, alpha=0.3)
+        fname1 = f"{title_prefix}_signal.png"
+        plt.savefig(fname1, dpi=150, bbox_inches="tight")
+        print(f"[PLOT] TX signal plot saved to {fname1}")
+        plt.close()
+        
+        # 2. Спектр сигнала
+        if len(signal) > 0:
+            plt.figure(figsize=(10, 4))
+            freqs = np.fft.fftfreq(len(signal), 1.0/fs)
+            spectrum = np.abs(np.fft.fft(signal))
+            mask = freqs >= 0
+            plt.plot(freqs[mask], spectrum[mask], linewidth=0.5)
+            plt.title(f"{title_prefix} Spectrum")
+            plt.xlabel("Frequency (Hz)")
+            plt.ylabel("Magnitude")
+            plt.grid(True, alpha=0.3)
+            fname2 = f"{title_prefix}_spectrum.png"
+            plt.savefig(fname2, dpi=150, bbox_inches="tight")
+            print(f"[PLOT] TX spectrum plot saved to {fname2}")
+            plt.close()
+        
+        # 3. Гистограмма амплитуд
+        plt.figure(figsize=(8, 4))
+        plt.hist(signal, bins=50, alpha=0.7, edgecolor='black')
+        plt.title(f"{title_prefix} Amplitude Distribution")
+        plt.xlabel("Amplitude")
+        plt.ylabel("Count")
+        plt.grid(True, alpha=0.3)
+        fname3 = f"{title_prefix}_histogram.png"
+        plt.savefig(fname3, dpi=150, bbox_inches="tight")
+        print(f"[PLOT] TX histogram saved to {fname3}")
+        plt.close()
+        
+    except Exception as e:
+        print(f"[PLOT] Error plotting TX diagrams: {e}")

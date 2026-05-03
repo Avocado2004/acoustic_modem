@@ -55,6 +55,12 @@ PHASE_METHOD = "schroeder"
 # Modulation type: "QPSK" or "BPSK"
 MODULATION = "QPSK"  # Default QPSK for backward compatibility
 
+# Количество физических OFDM символов, составляющих один логический блок.
+# Логический блок всегда несет 96 бит (одно RS кодовое слово).
+# QPSK: 1 символ * 96 бит = 96 бит -> OFDM_SYMBOLS_PER_BLOCK = 1
+# BPSK: 2 символа * 48 бит = 96 бит -> OFDM_SYMBOLS_PER_BLOCK = 2
+OFDM_SYMBOLS_PER_BLOCK = 1  # По умолчанию для QPSK
+
 # BITS_PER_OFDM_SYMBOL is now dynamic based on modulation
 if MODULATION == "BPSK":
     BITS_PER_SYMBOL = 1  # BPSK: 1 bit per subcarrier
@@ -68,6 +74,45 @@ if BITS_PER_OFDM_SYMBOL != RS_CW_BITS:
 else:
     print(f"[CFG] One OFDM symbol carries exactly one RS codeword ({RS_CW_BYTES} bytes, {RS_CW_BITS} bits).")
 
+
+def set_modulation(modulation_type):
+    """
+    Динамически устанавливает тип модуляции и обновляет все зависимые параметры.
+    
+    Параметры:
+    - modulation_type: строка "BPSK" или "QPSK"
+    
+    Возвращает:
+    - True если модуляция успешно изменена, False если тип не поддерживается
+    """
+    global MODULATION, BITS_PER_SYMBOL, BITS_PER_OFDM_SYMBOL, OFDM_SYMBOLS_PER_BLOCK
+    
+    modulation_type = modulation_type.upper()
+    if modulation_type not in ["BPSK", "QPSK"]:
+        print(f"[CFG-ERR] Неизвестный тип модуляции: {modulation_type}. Используйте 'BPSK' или 'QPSK'.")
+        return False
+    
+    MODULATION = modulation_type
+    
+    if MODULATION == "BPSK":
+        BITS_PER_SYMBOL = 1  # BPSK: 1 bit per subcarrier
+        OFDM_SYMBOLS_PER_BLOCK = 2  # 2 символа BPSK = 1 логический блок (96 бит)
+    else:
+        BITS_PER_SYMBOL = 2  # QPSK: 2 bits per subcarrier
+        OFDM_SYMBOLS_PER_BLOCK = 1  # 1 символ QPSK = 1 логический блок (96 бит)
+    
+    BITS_PER_OFDM_SYMBOL = Nsub * BITS_PER_SYMBOL
+    
+    print(f"[CFG] Модуляция изменена на {MODULATION}: BITS_PER_SYMBOL={BITS_PER_SYMBOL}, BITS_PER_OFDM_SYMBOL={BITS_PER_OFDM_SYMBOL}, OFDM_SYMBOLS_PER_BLOCK={OFDM_SYMBOLS_PER_BLOCK}")
+    
+    # Проверка совместимости с RS кодом
+    if BITS_PER_OFDM_SYMBOL != RS_CW_BITS:
+        print(f"[WARN] bits per OFDM symbol = {BITS_PER_OFDM_SYMBOL}, RS cw bits = {RS_CW_BITS}. Expected equality for 1 cw/symbol.")
+    else:
+        print(f"[CFG] One OFDM symbol carries exactly one RS codeword ({RS_CW_BYTES} bytes, {RS_CW_BITS} bits).")
+    
+    return True
+
 # Habr params (unchanged)
 HABR_SAMPLE_BLOCKS = 200
 HABR_PHASE_GRID = 36
@@ -78,7 +123,8 @@ HABR_SAVE_FILE = "habr_phases.npy"
 subc_phases = None
 
 # Globals shared TX/RX
-DEFAULT_PACKET_BLOCKS = 75  # default OFDM blocks per packet
+# DEFAULT_PACKET_BLOCKS теперь означает количество ЛОГИЧЕСКИХ блоков (по 96 бит каждый)
+DEFAULT_PACKET_BLOCKS = 75  # default logical OFDM blocks per packet
 GAP_OFDM_SYMBOLS = 0
 SYMBOL_LEN = Nfft + Ncp
 GAP_SAMPLES_DEFAULT = GAP_OFDM_SYMBOLS * SYMBOL_LEN

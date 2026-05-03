@@ -21,6 +21,8 @@ def build_header(mode: bytes, data_len: int, filename_bytes: bytes = b'', packet
     Создание 64-байтного заголовка Transmission.
     Устанавливает верхние 4 бита hdr[0] в 1 для надежной маркировки.
     CRC32 (4 байта, big-endian) сохраняется в hdr[52:56].
+    
+    packet_blocks - количество ЛОГИЧЕСКИХ блоков (по 96 бит каждый).
     """
     if isinstance(mode, (bytes, bytearray)) and len(mode) > 0 and mode[:1] == b'F':
         tx_type = 0b11
@@ -49,7 +51,7 @@ def build_header(mode: bytes, data_len: int, filename_bytes: bytes = b'', packet
     fname_field = (fname_b[:32]).ljust(32, b'\x00')
     hdr[14:14+32] = fname_field
     hdr[46:50] = struct.pack('>I', int(packet_no) & 0xFFFFFFFF)
-    # packet_blocks сохраняется в 50..51 (2 байта)
+    # packet_blocks сохраняется в 50..51 (2 байта) - это ЛОГИЧЕСКИЕ блоки
     hdr[50:52] = struct.pack('>H', int(packet_blocks) & 0xFFFF)
     # Сохраняем CRC32 в 52..55 (big-endian). Если crc32=0, сохраняет ноль.
     hdr[52:56] = struct.pack('>I', int(crc32) & 0xFFFFFFFF)
@@ -114,7 +116,7 @@ def parse_header(header64: bytes):
             'name_len': name_len,
             'filename': filename,
             'packet_no': packet_no,
-            'packet_blocks': packet_blocks,
+            'packet_blocks': packet_blocks,  # ЛОГИЧЕСКИЕ блоки
             'crc32': crc32_val
         }
     else:
@@ -141,21 +143,31 @@ def simulate_packet_positions(total_data_len_bytes, filename_bytes, mode_is_text
     """
     Симуляция позиций пакетов для передачи.
     Возвращает список смещений (в отсчетах) для каждого пакета.
+    
+    packet_blocks_local - количество ЛОГИЧЕСКИХ блоков в пакете.
     """
     positions = []
+    
+    # Переводим логические блоки в физические OFDM символы
+    physical_symbols_per_packet = packet_blocks_local * modem_config.OFDM_SYMBOLS_PER_BLOCK
+    
     def max_payload_for_header(header_bytes):
         step = RS_DATA_BYTES
         if total_data_len_bytes <= step:
-            td, nblk = bytes_to_ofdm_blocks_bytes(header_bytes + (b'\x00' * total_data_len_bytes))
-            if nblk <= packet_blocks_local:
+            td, n_physical_symbols = bytes_to_ofdm_blocks_bytes(header_bytes + (b'\x00' * total_data_len_bytes))
+            # Сравниваем физические символы
+            if n_physical_symbols <= physical_symbols_per_packet:
                 return total_data_len_bytes
             return 0
-        hi_bound = min(total_data_len_bytes, packet_blocks_local * RS_DATA_BYTES * 8)
+        
+        # Максимальное количество данных: packet_blocks_local логических блоков * RS_DATA_BYTES * 8 бит
+        # Но нужно учесть, что физических символов может быть больше
+        hi_bound = min(total_data_len_bytes, physical_symbols_per_packet * RS_DATA_BYTES)
         lo = 0
         hi = step if step < hi_bound else hi_bound
         while True:
-            td, nblk = bytes_to_ofdm_blocks_bytes(header_bytes + (b'\x00' * hi))
-            if nblk > packet_blocks_local:
+            td, n_physical_symbols = bytes_to_ofdm_blocks_bytes(header_bytes + (b'\x00' * hi))
+            if n_physical_symbols > physical_symbols_per_packet:
                 break
             if hi >= hi_bound:
                 break
@@ -165,8 +177,8 @@ def simulate_packet_positions(total_data_len_bytes, filename_bytes, mode_is_text
         while lo <= hi:
             mid = (lo + hi) // 2
             mid -= (mid % step)
-            td, nblk = bytes_to_ofdm_blocks_bytes(header_bytes + (b'\x00' * mid))
-            if nblk <= packet_blocks_local:
+            td, n_physical_symbols = bytes_to_ofdm_blocks_bytes(header_bytes + (b'\x00' * mid))
+            if n_physical_symbols <= physical_symbols_per_packet:
                 best = mid
                 lo = mid + step
             else:
@@ -183,8 +195,9 @@ def simulate_packet_positions(total_data_len_bytes, filename_bytes, mode_is_text
 
     best_first = max_payload_for_header(hdr_first)
     payload = min(remaining, best_first)
-    td, nblk = bytes_to_ofdm_blocks_bytes(hdr_first + (b'\x00' * payload))
-    packet_samples = preamble_len + nblk * symbol_len + gap_samples
+    td, n_physical_symbols = bytes_to_ofdm_blocks_bytes(hdr_first + (b'\x00' * payload))
+    # Используем физические символы для расчета сэмплов
+    packet_samples = preamble_len + n_physical_symbols * symbol_len + gap_samples
     positions.append(offset)
     offset += packet_samples
     remaining -= payload
@@ -194,8 +207,8 @@ def simulate_packet_positions(total_data_len_bytes, filename_bytes, mode_is_text
         hdr = make_packet_header_bytes(pkt_no, tx_type_bits)
         best = max_payload_for_header(hdr)
         payload = min(remaining, best)
-        td, nblk = bytes_to_ofdm_blocks_bytes(hdr + (b'\x00' * payload))
-        packet_samples = preamble_len + nblk * symbol_len + gap_samples
+        td, n_physical_symbols = bytes_to_ofdm_blocks_bytes(hdr + (b'\x00' * payload))
+        packet_samples = preamble_len + n_physical_symbols * symbol_len + gap_samples
         positions.append(offset)
         offset += packet_samples
         remaining -= payload
@@ -209,7 +222,9 @@ def simulate_packet_positions(total_data_len_bytes, filename_bytes, mode_is_text
 def bytes_to_ofdm_blocks_bytes(bstream: bytes):
     """
     Разбивка потока байт на блоки OFDM с RS кодированием.
-    Возвращает (time_domain_samples, num_blocks).
+    Возвращает (time_domain_samples, n_physical_symbols).
+    
+    n_physical_symbols - количество ФИЗИЧЕСКИХ OFDM символов.
     """
     if len(bstream) == 0:
         return np.array([], dtype=float), 0
@@ -222,5 +237,5 @@ def bytes_to_ofdm_blocks_bytes(bstream: bytes):
     bits_blocks_local = [bytes_to_bits(b) for b in encoded]
 
     data_bits_local = np.concatenate(bits_blocks_local) if len(bits_blocks_local) > 0 else np.array([], dtype=int)
-    td_local, nblocks_local = build_data_td(data_bits_local) if data_bits_local.size > 0 else (np.array([], dtype=float), 0)
-    return td_local, nblocks_local
+    td_local, n_physical_symbols = build_data_td(data_bits_local) if data_bits_local.size > 0 else (np.array([], dtype=float), 0)
+    return td_local, n_physical_symbols

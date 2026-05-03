@@ -9,10 +9,9 @@ import random
 import string
 import glob
 import numpy as np
-import importlib
 
 # Импортируем функции из других модулей
-from modem_config import init_phases, fs, wavfile, MODULATION, Nfft, Ncp, Nsub, BITS_PER_SYMBOL
+from modem_config import init_phases, fs, wavfile
 from modem_modulation import build_preamble
 from modem_tx import transmit_text, transmit_file, _transmit_data
 from modem_rx import receive_from_file, live_receive_and_process
@@ -34,107 +33,7 @@ def scale_param(min_val, max_val, percent):
     return min_val + (max_val - min_val) * (percent / 100.0)
 
 
-def print_distortion_params(percent, fs, data_size_bytes=300):
-    """
-    Выводит в консоль все параметры искажений и конфигурации, которые будут применены.
-    
-    Параметры:
-    - percent: процент искажений (0-100)
-    - fs: частота дискретизации
-    - data_size_bytes: размер передаваемых данных в байтах
-    """
-    from modem_config import MODULATION, Nfft, Ncp, Nsub, BITS_PER_SYMBOL
-    
-    print(f"\n[LOOP-PARAMS] ===== Параметры симуляции канала для {percent}% искажений =====")
-    
-    # Параметры конфигурации
-    print(f"[LOOP-PARAMS] Параметры конфигурации:")
-    print(f"[LOOP-PARAMS]   Частота дискретизации: {fs} Гц")
-    print(f"[LOOP-PARAMS]   Тип модуляции: {MODULATION}")
-    print(f"[LOOP-PARAMS]   Размер данных: {data_size_bytes} байт")
-    print(f"[LOOP-PARAMS]   OFDM: Nfft={Nfft}, Ncp={Ncp}, Nsub={Nsub}")
-    print(f"[LOOP-PARAMS]   Бит на символ: {BITS_PER_SYMBOL}")
-    
-    # Оценка длительности сигнала
-    bits_per_ofdm = Nsub * BITS_PER_SYMBOL
-    total_bits = data_size_bytes * 8
-    num_ofdm_symbols = (total_bits + bits_per_ofdm - 1) // bits_per_ofdm  # округление вверх
-    samples_per_ofdm = Nfft + Ncp
-    total_samples = num_ofdm_symbols * samples_per_ofdm
-    duration_sec = total_samples / fs
-    
-    print(f"[LOOP-PARAMS]   Оценка длительности сигнала:")
-    print(f"[LOOP-PARAMS]     Всего бит данных: {total_bits}")
-    print(f"[LOOP-PARAMS]     Бит на OFDM символ: {bits_per_ofdm}")
-    print(f"[LOOP-PARAMS]     Количество OFDM символов: ~{num_ofdm_symbols}")
-    print(f"[LOOP-PARAMS]     Длительность: ~{duration_sec:.3f} сек ({total_samples} samples)")
-    
-    # 1. AWGN: SNR от 30 дБ (0%) до 15 дБ (100%)
-    snr_db = scale_param(30.0, 15.0, percent)
-    print(f"[LOOP-PARAMS] 1. AWGN (Аддитивный белый гауссовский шум):")
-    print(f"[LOOP-PARAMS]    SNR = {snr_db:.1f} дБ")
-    
-    # 2. Многолучевость
-    print(f"[LOOP-PARAMS] 2. Многолучевость (Multipath):")
-    if percent == 0:
-        delays_ms = [0.0]
-        gains = [1.0]
-        print(f"[LOOP-PARAMS]    Задержки = {delays_ms} мс, усиления = {gains}")
-    else:
-        direct_gain = scale_param(1.0, 0.6, percent)
-        multipath_gain1 = 0.3 if percent > 30 else 0.3 * (percent / 30.0)
-        multipath_gain2 = 0.1 if percent > 60 else (0.1 * (percent / 60.0) if percent > 0 else 0.0)
-        
-        delays_ms = [0.0, 2.0, 5.0]
-        gains = [direct_gain, multipath_gain1, multipath_gain2]
-        print(f"[LOOP-PARAMS]    Задержки = {delays_ms} мс")
-        print(f"[LOOP-PARAMS]    Усиления = {gains}")
-        print(f"[LOOP-PARAMS]    Прямой луч: {delays_ms[0]} мс, усиление {gains[0]:.3f}")
-        if percent > 30:
-            print(f"[LOOP-PARAMS]    Луч 2: {delays_ms[1]} мс, усиление {gains[1]:.3f}")
-        if percent > 60:
-            print(f"[LOOP-PARAMS]    Луч 3: {delays_ms[2]} мс, усиление {gains[2]:.3f}")
-    
-    # 3. Сдвиг частоты
-    freq_offset = scale_param(0.0, 5.0, percent)
-    print(f"[LOOP-PARAMS] 3. Сдвиг частоты (Доплеровский сдвиг):")
-    print(f"[LOOP-PARAMS]    Сдвиг = {freq_offset:.2f} Гц")
-    
-    # 4. Новые искажения: АЧХ и затухание
-    print(f"[LOOP-PARAMS] 4. АЧХ и затухание с расстоянием:")
-    if percent == 0:
-        print(f"[LOOP-PARAMS]    ✓ АЧХ ровная (0% искажений)")
-        print(f"[LOOP-PARAMS]    ✓ Расстояние 1 м (нет затухания)")
-    else:
-        distance = 1.0 + (5.0 - 1.0) * (percent / 100.0)
-        print(f"[LOOP-PARAMS]    ✓ АЧХ случайная (до ±{12.0 * percent / 100.0:.1f} дБ)")
-        print(f"[LOOP-PARAMS]    ✓ Расстояние {distance:.1f} м (затухание {1.0/distance:.2f}x)")
-    
-    # 5. Дополнительные искажения
-    print(f"[LOOP-PARAMS] 5. Дополнительные искажения:")
-    
-    if percent > 50:
-        threshold = 0.8
-        print(f"[LOOP-PARAMS]    ✓ Soft clipping: threshold = {threshold}, type = tanh")
-    else:
-        print(f"[LOOP-PARAMS]    ✗ Soft clipping: НЕ применяется (нужно >50%)")
-    
-    if percent > 80:
-        drive = 0.5
-        print(f"[LOOP-PARAMS]    ✓ Distortion: type = odd, drive = {drive}")
-    else:
-        print(f"[LOOP-PARAMS]    ✗ Distortion: НЕ применяется (нужно >80%)")
-    
-    if percent > 70:
-        impulse_level = 0.5
-        print(f"[LOOP-PARAMS]    ✓ Impulse noise: level = {impulse_level}")
-    else:
-        print(f"[LOOP-PARAMS]    ✗ Impulse noise: НЕ применяется (нужно >70%)")
-    
-    print(f"[LOOP-PARAMS] ===========================================\n")
-
-
-def apply_channel_distortions(sig, fs, percent, sim=None):
+def apply_channel_distortions(sig, fs, percent):
     """
     Применяет искажения канала в зависимости от процента искажений.
     
@@ -142,13 +41,10 @@ def apply_channel_distortions(sig, fs, percent, sim=None):
     - sig: входной сигнал (может быть int16, float32, float64)
     - fs: частота дискретизации
     - percent: процент искажений (0-100)
-    - sim: экземпляр ChannelSimulator (если None, создается новый)
     
     Возвращает:
     - искаженный сигнал (всегда float64 в диапазоне [-1.0, 1.0])
     """
-    import numpy as np
-    
     # При 0% искажений возвращаем нормализованный сигнал
     if percent == 0:
         print(f"[CHANNEL] Процент искажений 0% — сигнал не изменяется")
@@ -168,11 +64,8 @@ def apply_channel_distortions(sig, fs, percent, sim=None):
         result = sig.astype(np.float64)
     
     print(f"[CHANNEL-DBG] Диапазон сигнала до искажений: [{np.min(result):.6f}, {np.max(result):.6f}]")
-    print(f"[CHANNEL-DBG] RMS сигнала до искажений: {np.sqrt(np.mean(result**2)):.6f}")
     
-    # Используем переданный экземпляр или создаем новый
-    if sim is None:
-        sim = ChannelSimulator(fs=fs)
+    sim = ChannelSimulator(fs=fs)
     
     # Основные искажения (всегда применяются, интенсивность масштабируется)
     
@@ -204,47 +97,27 @@ def apply_channel_distortions(sig, fs, percent, sim=None):
     print(f"[CHANNEL] Применение сдвига частоты: {freq_offset:.2f} Гц")
     result = sim.apply_frequency_offset(result, freq_offset)
     
-    # Новые искажения: сначала АЧХ (искажение формы спектра), потом затухание (уменьшение амплитуды)
-    
-    # 4. Случайная АЧХ: применяется в полосе частот (300-5000 Гц)
-    print(f"[CHANNEL] Применение случайной АЧХ (percent={percent}%)")
-    result = sim.apply_random_frequency_response(result, percent=percent)
-    print(f"[CHANNEL-DBG] RMS после АЧХ: {np.sqrt(np.mean(result**2)):.6f}")
-    
-    # 5. Затухание с расстоянием: уменьшение уровня сигнала
-    print(f"[CHANNEL] Применение затухания с расстоянием (percent={percent}%)")
-    result = sim.apply_distance_attenuation(result, percent=percent)
-    print(f"[CHANNEL-DBG] RMS после затухания: {np.sqrt(np.mean(result**2)):.6f}")
-    
     # Дополнительные искажения (включаются при достижении порога)
     
-    # 6. Soft clipping (tanh, threshold=0.8): включается при >50%
+    # 4. Soft clipping (tanh, threshold=0.8): включается при >50%
     if percent > 50:
         threshold = 0.8
         print(f"[CHANNEL] Применение soft clipping: threshold = {threshold}, type = tanh")
         result = sim.apply_soft_clipping(result, threshold, clip_type='tanh')
     
-    # 7. Distortion (type='odd', drive=0.5): включается при >80%
+    # 5. Distortion (type='odd', drive=0.5): включается при >80%
     if percent > 80:
         drive = 0.5
         print(f"[CHANNEL] Применение distortion: type = odd, drive = {drive}")
         result = sim.apply_distortion(result, drive=drive, type='odd')
     
-    # 8. Impulse noise (impulse_level=0.5): включается при >70%
+    # 6. Impulse noise (impulse_level=0.5): включается при >70%
     if percent > 70:
         impulse_level = 0.5
         print(f"[CHANNEL] Применение impulse noise: level = {impulse_level}")
         result = sim.apply_impulse_noise(result, impulse_level=impulse_level)
     
-    print(f"[CHANNEL-DBG] Диапазон сигнала после всех искажений: [{np.min(result):.6f}, {np.max(result):.6f}]")
-    print(f"[CHANNEL-DBG] RMS сигнала после всех искажений: {np.sqrt(np.mean(result**2)):.6f}")
-    
-    # Нормализуем сигнал обратно в диапазон [-1.0, 1.0] чтобы избежать переполнения при сохранении в int16
-    max_val = np.max(np.abs(result))
-    if max_val > 1.0:
-        print(f"[CHANNEL] Нормализация сигнала: деление на {max_val:.6f}")
-        result = result / max_val
-        print(f"[CHANNEL-DBG] После нормализации: [{np.min(result):.6f}, {np.max(result):.6f}]")
+    print(f"[CHANNEL-DBG] Диапазон сигнала после искажений: [{np.min(result):.6f}, {np.max(result):.6f}]")
     
     return result
 
@@ -295,34 +168,6 @@ def run_loop():
     """Режим Loop: генерация -> передача -> прием -> проверка."""
     print("\n[LOOP] Запуск режима Loop (генерация -> передача -> прием -> проверка)")
     
-    # Запрос типа модуляции
-    print("\n[LOOP] Выберите тип модуляции:")
-    print("  1. BPSK (1 бит на символ)")
-    print("  2. QPSK (2 бита на символ, по умолчанию)")
-    modulation_input = input("Ваш выбор (1/2, по умолчанию 2): ").strip()
-    
-    if modulation_input == '1':
-        modulation_type = "BPSK"
-    else:
-        modulation_type = "QPSK"  # QPSK по умолчанию
-    
-    print(f"[LOOP] Выбрана модуляция: {modulation_type}")
-    
-    # Применяем выбранную модуляцию
-    from modem_config import set_modulation
-    success = set_modulation(modulation_type)
-    if not success:
-        print("[LOOP-ERR] Ошибка при установке модуляции. Используется QPSK по умолчанию.")
-        set_modulation("QPSK")
-    
-    # Обновляем локальные ссылки на параметры конфигурации
-    from modem_config import init_phases, fs, wavfile, MODULATION, Nfft, Ncp, Nsub, BITS_PER_SYMBOL
-    
-    # Переинициализируем фазы с новой модуляцией
-    init_phases()
-    
-    print(f"[LOOP] Модуляция применена: {MODULATION}, BITS_PER_SYMBOL={BITS_PER_SYMBOL}")
-    
     # Запрос процента искажений
     percent_input = input("Введите процент искажений (0-100%, по умолчанию 100%): ").strip()
     if not percent_input:
@@ -342,15 +187,11 @@ def run_loop():
     
     print(f"[LOOP] Установлен процент искажений: {percent}%")
     
-    # Выводим параметры искажений, которые будут применены
-    # Сначала генерируем данные, чтобы знать их размер
-    random_text = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(300))
-    original_data = random_text.encode('utf-8')
+    # 1. Генерируем рандомный текст
+    random_text = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(50))
     print(f"[LOOP] Сгенерирован текст: {random_text[:20]}...")
+    original_data = random_text.encode('utf-8')
     print(f"[LOOP] Размер данных: {len(original_data)} байт")
-    
-    # Выводим параметры искажений с учетом размера данных
-    print_distortion_params(percent, fs, len(original_data))
     
     # 2. Передаем текст
     print(f"\n[LOOP] Передача текста...")
@@ -377,14 +218,8 @@ def run_loop():
         if fs_wav != fs:
             print(f"[LOOP-WARN] Частота дискретизации WAV ({fs_wav}) отличается от настроек ({fs})")
         
-        # Создаем ОДИН экземпляр ChannelSimulator на весь сеанс,
-        # чтобы АЧХ была постоянной
-        sim = ChannelSimulator(fs=fs_wav)
-        sim.reset_channel_state()  # Сбрасываем состояние перед новой симуляцией
-        print(f"[LOOP] Создан ChannelSimulator (постоянная АЧХ на сеанс)")
-        
         # Применяем искажения
-        distorted_sig = apply_channel_distortions(sig, fs_wav, percent, sim=sim)
+        distorted_sig = apply_channel_distortions(sig, fs_wav, percent)
         
         # Сохраняем искаженный сигнал обратно в WAV файл
         # distorted_sig в float64 диапазоне [-1.0, 1.0], преобразуем в int16
