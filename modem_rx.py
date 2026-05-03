@@ -433,8 +433,15 @@ def receive_from_file(wav_path):
     packet_blocks_val = packet_blocks_from_hdr
     
     for pkt_idx, pref in enumerate(expected_abs):
-        decoded_bytes, rs_ok_count, used_preamble = decode_packet_at_candidate(pref, packet_blocks_val, packet_idx=pkt_idx, bytes_before_packet=bytes_collected, expected_total=expected_total)
-        print(f"[RX-DBG] pkt{pkt_idx}: pref={pref} used_pre={used_preamble} RS_OK={rs_ok_count} bytes={len(decoded_bytes)}")
+        if pkt_idx == 0:
+            # Используем уже декодированные данные первого пакета, чтобы избежать двойного декодирования
+            decoded_bytes = pkt0_decoded
+            rs_ok_count = pkt0_rs_ok
+            used_preamble = pkt0_used_pre
+            print(f"[RX-DBG] pkt{pkt_idx}: pref={pref} used_pre={used_preamble} RS_OK={rs_ok_count} bytes={len(decoded_bytes)} (reused)")
+        else:
+            decoded_bytes, rs_ok_count, used_preamble = decode_packet_at_candidate(pref, packet_blocks_val, packet_idx=pkt_idx, bytes_before_packet=bytes_collected, expected_total=expected_total)
+            print(f"[RX-DBG] pkt{pkt_idx}: pref={pref} used_pre={used_preamble} RS_OK={rs_ok_count} bytes={len(decoded_bytes)}")
         
         if pkt_idx == 0:
             if len(decoded_bytes) < 64:

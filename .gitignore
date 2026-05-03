@@ -69,6 +69,8 @@ found_preamble_peaks.json
 *.aep
 *.dcover
 *.rtf
+agc_per_symbol_data.csv
+loop_original_text.bin
 
 # Build artifacts
 OFDMModem.spec
