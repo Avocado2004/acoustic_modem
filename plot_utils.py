@@ -37,7 +37,7 @@ def plot_constellation(symb, title="Constellation"):
         except Exception as e:
             print(f"[PLOT] Failed to save constellation data: {e}")
         return
-
+    
     try:
         import numpy as np
         plt.figure(figsize=(5, 5))
@@ -75,7 +75,7 @@ def plot_signal(signal_data, fs, title="Signal", filename="signal.png"):
         except Exception as e:
             print(f"[PLOT] Failed to save signal data: {e}")
         return
-
+    
     try:
         import numpy as np
         plt.figure(figsize=(10, 4))
@@ -110,7 +110,7 @@ def plot_spectrum(freq, spectrum, title="Spectrum", filename="spectrum.png"):
         except Exception as e:
             print(f"[PLOT] Failed to save spectrum data: {e}")
         return
-
+    
     try:
         import numpy as np
         plt.figure(figsize=(10, 4))
@@ -267,6 +267,7 @@ def plot_rx_equalizer_final(Hk_smooth_list, subc_inds, fs, Nfft):
             
     except Exception as e:
         print(f"[PLOT] Error plotting final equalizer: {e}")
+
 def plot_equalizer_dynamics(equalizer_history_list, subc_inds, fs, Nfft, title_prefix="Equalizer Dynamics"):
     """
     Визуализация динамики работы адаптивного эквалайзера.
@@ -425,8 +426,6 @@ def plot_equalizer_dynamics(equalizer_history_list, subc_inds, fs, Nfft, title_p
     except Exception as e:
         print(f"[PLOT] Error plotting equalizer dynamics: {e}")
 
-
-
 def plot_tx_diagrams(signal, fs, title_prefix="TX"):
     """
     Построить и сохранить диаграммы для переданного сигнала.
@@ -502,3 +501,81 @@ def plot_tx_diagrams(signal, fs, title_prefix="TX"):
         
     except Exception as e:
         print(f"[PLOT] Error plotting TX diagrams: {e}")
+
+
+def plot_agc_per_symbol(agc_history_list, title="AGC per Symbol"):
+    """
+    Построить график значений AGC (Automatic Gain Control) для каждого символа.
+    
+    Параметры:
+    - agc_history_list: список словарей с данными AGC по каждому символу.
+      Каждый элемент содержит: symbol_idx, pkt_idx, frame_idx, cur_rms, est_rms, gain_sym
+    - title: заголовок графика
+    
+    На настольных платформах строит график и сохраняет в PNG файл.
+    На мобильных платформах или при недоступности matplotlib сохраняет данные в CSV.
+    """
+    if not agc_history_list or len(agc_history_list) == 0:
+        print("[PLOT] No AGC data to plot")
+        return
+    
+    try:
+        import numpy as np
+        
+        # Извлекаем данные из списка
+        symbol_indices = [item['symbol_idx'] for item in agc_history_list]
+        cur_rms_values = [item['cur_rms'] for item in agc_history_list]
+        est_rms_values = [item['est_rms'] for item in agc_history_list]
+        gain_sym_values = [item['gain_sym'] for item in agc_history_list]
+        
+        # Проверяем, нужно ли использовать matplotlib
+        if IS_MOBILE or not PLOTTING_AVAILABLE or plt is None:
+            # Сохраняем данные в CSV (для мобильных платформ или если matplotlib недоступен)
+            data = np.column_stack((symbol_indices, cur_rms_values, est_rms_values, gain_sym_values))
+            filename = "agc_per_symbol_data.csv"
+            np.savetxt(filename, data, delimiter=",", 
+                         header="symbol_index,cur_rms,est_rms,gain_sym", comments="")
+            print(f"[PLOT] AGC data saved to {filename}")
+            return
+        
+        # Построение графика с использованием matplotlib
+        plt.figure(figsize=(12, 6))
+        
+        # График cur_rms и est_rms (левая ось Y)
+        ax1 = plt.gca()
+        ax1.plot(symbol_indices, cur_rms_values, 'b-', linewidth=0.5, alpha=0.7, label='cur_rms (текущий RMS)')
+        ax1.plot(symbol_indices, est_rms_values, 'g-', linewidth=0.5, alpha=0.7, label='est_rms (сглаженный RMS)')
+        ax1.set_xlabel('Индекс символа')
+        ax1.set_ylabel('RMS', color='b')
+        ax1.tick_params(axis='y', labelcolor='b')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(loc='upper left')
+        
+        # График gain_sym (правая ось Y)
+        ax2 = ax1.twinx()
+        ax2.plot(symbol_indices, gain_sym_values, 'r-', linewidth=0.5, alpha=0.7, label='gain_sym (усиление)')
+        ax2.set_ylabel('Усиление', color='r')
+        ax2.tick_params(axis='y', labelcolor='r')
+        ax2.legend(loc='upper right')
+        
+        plt.title(title)
+        plt.xlabel('Индекс символа')
+        plt.grid(True, alpha=0.3)
+        
+        # Сохраняем график в файл
+        filename = "agc_per_symbol.png"
+        plt.savefig(filename, dpi=150, bbox_inches="tight")
+        print(f"[PLOT] AGC per symbol plot saved to {filename}")
+        plt.close()
+        
+        # Дополнительно сохраняем данные в CSV для анализа
+        data = np.column_stack((symbol_indices, cur_rms_values, est_rms_values, gain_sym_values))
+        csv_filename = "agc_per_symbol_data.csv"
+        np.savetxt(csv_filename, data, delimiter=",", 
+                     header="symbol_index,cur_rms,est_rms,gain_sym", comments="")
+        print(f"[PLOT] AGC data also saved to {csv_filename}")
+        
+    except Exception as e:
+        print(f"[PLOT] Error plotting AGC per symbol: {e}")
+        import traceback
+        traceback.print_exc()

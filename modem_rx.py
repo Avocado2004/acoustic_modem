@@ -37,6 +37,11 @@ last_packet_used_pre = None
 # Глобальный эквалайзер для сохранения состояния между пакетами
 global_equalizer = None
 
+# Список для хранения истории AGC по всем символам всех пакетов
+agc_history_list = []
+# Глобальный счётчик символов (нумеруется по всем пакетам)
+_global_symbol_counter = 0
+
 
 # -----------------------
 # Вспомогательная функция для декодирования с конкретной модуляцией
@@ -50,7 +55,7 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
     
     Возвращает (decoded_bytes, rs_ok_count, used_preamble, equalizer_instance) или None при ошибке.
     """
-    global abs_corr, rx, preamble_td, last_agc_rms
+    global abs_corr, rx, preamble_td, last_agc_rms, agc_history_list, _global_symbol_counter
     
     if 'abs_corr' not in globals() or 'rx' not in globals():
         return None
@@ -153,6 +158,18 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         if est_rms < 1e-12:
             est_rms = 1e-12
         gain_sym = SYMBOL_TARGET_RMS / est_rms
+        
+        # Сохраняем данные AGC для последующего построения графика
+        agc_history_list.append({
+            'symbol_idx': _global_symbol_counter,
+            'pkt_idx': packet_idx,
+            'frame_idx': idxf,
+            'cur_rms': cur_rms,
+            'est_rms': est_rms,
+            'gain_sym': gain_sym
+        })
+        _global_symbol_counter += 1
+        
         useful = useful * gain_sym
         
         try:
@@ -476,7 +493,22 @@ def receive_from_file(wav_path):
                 plot_rx_equalizer_final(Hk_smooth_list, subc_inds, fs, Nfft)
         except Exception as e:
             print(f"[RX] Ошибка при построении итогового графика эквалайзера: {e}")
-        
+    
+    # Построение графика AGC по окончании приёма из файла
+    if PLOTTING_AVAILABLE:
+        try:
+            from plot_utils import plot_agc_per_symbol
+            global agc_history_list
+            if 'agc_history_list' in globals() and agc_history_list:
+                print(f"[RX] Построение графика AGC по окончании приёма из файла...")
+                plot_agc_per_symbol(agc_history_list, title="AGC per Symbol (File Mode)")
+                # Очищаем список после построения графика
+                agc_history_list.clear()
+                global _global_symbol_counter
+                _global_symbol_counter = 0
+        except Exception as e:
+            print(f"[RX] Ошибка при построении графика AGC: {e}")
+    
     return True
 
 
@@ -794,6 +826,21 @@ def live_receive_and_process():
                     plot_rx_equalizer_final(Hk_smooth_list, subc_inds, fs, Nfft)
             except Exception as e:
                 print(f"[RX] Ошибка при построении итогового графика эквалайзера: {e}")
+        
+        # Построение графика AGC по окончании живого приёма
+        if PLOTTING_AVAILABLE:
+            try:
+                from plot_utils import plot_agc_per_symbol
+                global agc_history_list
+                if 'agc_history_list' in globals() and agc_history_list:
+                    print(f"[RX] Построение графика AGC по окончании живого приёма...")
+                    plot_agc_per_symbol(agc_history_list, title="AGC per Symbol (Live Mode)")
+                    # Очищаем список после построения графика
+                    agc_history_list.clear()
+                    global _global_symbol_counter
+                    _global_symbol_counter = 0
+            except Exception as e:
+                print(f"[RX] Ошибка при построении графика AGC: {e}")
 
 
 # -----------------------
