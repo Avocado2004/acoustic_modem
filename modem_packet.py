@@ -71,14 +71,63 @@ def make_packet_header_bytes(packet_no: int, tx_type: int) -> bytes:
     return bytes(hdr)
 
 
+def is_header_valid(header64: bytes) -> bool:
+    """
+    Проверяет валидность заголовка.
+    Возвращает False для нулевых заголовков или заголовков с невалидными полями.
+    """
+    if len(header64) < 4:
+        return False
+    
+    # Проверка на нулевой заголовок (все байты равны 0)
+    check_len = min(64, len(header64))
+    if all(b == 0 for b in header64[:check_len]):
+        return False
+    
+    b0 = header64[0]
+    is_transmission = bool(b0 & 0xF0)
+    
+    if is_transmission:
+        if len(header64) < 64:
+            return False
+        
+        # Проверяем валидность полей
+        try:
+            data_len = struct.unpack('>Q', header64[2:10])[0]
+            packet_blocks = struct.unpack('>H', header64[50:52])[0]
+            crc32_val = struct.unpack('>I', header64[52:56])[0]
+        except:
+            return False
+        
+        # Запрещаем нулевой CRC (признак мусора/шума)
+        if crc32_val == 0:
+            return False
+        
+        # Проверяем, что длина данных и количество блоков не равны 0 одновременно
+        if data_len == 0 and packet_blocks == 0:
+            return False
+        
+        # Проверяем валидность типа передачи
+        tx_type = b0 & 0x03
+        if tx_type not in (0b10, 0b11):  # T или F
+            return False
+    
+    return True
+
+
 def parse_header(header64: bytes):
     """
     Разбор заголовка.
     Transmission заголовок, если верхняя тетрада header64[0] != 0 (т.е. любой из верхних 4 бит установлен).
     Также извлекает CRC32 из hdr[52:56], если присутствует.
+    Возвращает также флаг is_valid.
     """
     if len(header64) < 1:
         raise ValueError("Empty header data")
+    
+    # Проверяем валидность заголовка
+    is_valid = is_header_valid(header64)
+    
     b0 = header64[0]
     is_transmission = bool(b0 & 0xF0)
     # Извлечение модуляции из битов 3-2 флагового байта
@@ -108,6 +157,7 @@ def parse_header(header64: bytes):
         mode = b'T' if tx_type == 0b10 else (b'F' if tx_type == 0b11 else b'\x00')
         return {
             'is_transmission': True,
+            'is_valid': is_valid,
             'version': version,
             'tx_type': tx_type,
             'mode': mode,
@@ -127,6 +177,7 @@ def parse_header(header64: bytes):
         mode = b'\x00'
         return {
             'is_transmission': False,
+            'is_valid': is_valid,
             'tx_type': tx_type,
             'mode': mode,
             'data_len': 0,
@@ -184,7 +235,7 @@ def simulate_packet_positions(total_data_len_bytes, filename_bytes, mode_is_text
             else:
                 hi = mid - step
         return best
-
+    
     tx_type_bits = 0b10 if mode_is_text else 0b11
     # Первый пакет содержит три последовательных 64-байтных заголовка Transmission
     single_hdr = build_header(b'T' if mode_is_text else b'F', total_data_len_bytes, filename_bytes=filename_bytes, packet_no=0, version=0, packet_blocks=packet_blocks_local)

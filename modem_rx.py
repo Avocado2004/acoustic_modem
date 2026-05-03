@@ -189,7 +189,6 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         # Сохраняем символы для градиентного созвездия
         global rx_constellation_symbols
         rx_constellation_symbols.extend(subc)
-        print(f"[DEBUG] Добавлено {len(subc)} символов, всего: {len(rx_constellation_symbols)}")
     
     if len(rx_syms_pkt_list) == 0:
         return None
@@ -400,6 +399,12 @@ def receive_from_file(wav_path):
     header64 = pkt0_decoded[:64]
     try:
         hdr = parse_header(header64)
+        
+        # Проверяем валидность заголовка
+        if not hdr.get('is_valid', False):
+            print(f"[RX-ERR] Invalid header (is_valid=False), discarding")
+            return False
+            
     except Exception as e:
         print("[RX-ERR] parse_header failed:", e)
         return False
@@ -482,12 +487,14 @@ def receive_from_file(wav_path):
     # CRC check
     try:
         hdr_crc = hdr.get('crc32', None)
-        if hdr_crc is not None:
+        if hdr_crc is not None and hdr_crc != 0:  # Запрещаем нулевой CRC
             calc_crc = zlib.crc32(assembled) & 0xFFFFFFFF
             if calc_crc == int(hdr_crc):
                 print(f"[RX-CRC] OK: CRC32 matched (0x{calc_crc:08X})")
             else:
                 print(f"[RX-CRC] MISMATCH: received 0x{int(hdr_crc):08X}, calculated 0x{calc_crc:08X}")
+        else:
+            print(f"[RX-CRC] SKIP: CRC is 0 or None, skipping CRC check")
     except Exception as e:
         print("[RX-CRC] crc check failed:", e)
         
@@ -620,10 +627,8 @@ def live_receive_and_process():
             
             # Предварительный AGC для слабых сигналов перед поиском преамбулы
             signal_rms = np.sqrt(np.mean(buf**2))
-            print(f"[AGC-PRE-LIVE] До AGC: signal_rms={signal_rms:.6f}")
             if signal_rms > 0:
                 buf = buf * (TARGET_RMS / signal_rms)
-                print(f"[AGC-PRE-LIVE] После AGC: target={TARGET_RMS}, gain={TARGET_RMS/signal_rms:.3f}, новый RMS={np.sqrt(np.mean(buf**2)):.6f}")
             
             corr_full = np.correlate(buf, preamble_td_local, mode='valid')
             energy = np.convolve(buf * buf, np.ones(pre_len)[::-1], mode='valid')
@@ -636,11 +641,16 @@ def live_receive_and_process():
             
             # Вычисляем уровень шума как медиану корреляции
             noise_floor = np.median(norm_corr)  # Медиана корреляции (шум)
-            threshold = noise_floor * 5.0  # Порог в 5 раз выше шума
-            print(f"[SYNC] noise_floor={noise_floor:.6f}, threshold={threshold:.6f}, peak_val={peak_val:.6f}")
+            # Повышаем порог: минимум в 10 раз выше шума или абсолютный минимум 0.1
+            threshold = max(noise_floor * 10.0, 0.1)
+            # Проверяем энергию сигнала в окне преамбулы
+            signal_energy = np.mean(buf[peak_idx:peak_idx+pre_len]**2) if peak_idx + pre_len <= len(buf) else 0
+            min_energy = 1e-6  # Минимальная энергия для валидного сигнала
+            print(f"[SYNC] noise_floor={noise_floor:.6f}, threshold={threshold:.6f}, peak_val={peak_val:.6f}, energy={signal_energy:.6f}")
             
-            if peak_val < threshold:
-                print(f"[SYNC] skip: peak {peak_val:.3f} < threshold {threshold:.3f}")
+            if peak_val < threshold or signal_energy < min_energy:
+                reason = "peak too low" if peak_val < threshold else "energy too low"
+                print(f"[SYNC] skip: {reason} (peak={peak_val:.3f}, threshold={threshold:.3f}, energy={signal_energy:.6f})")
                 time.sleep(0.02)
                 continue
             
@@ -718,6 +728,14 @@ def live_receive_and_process():
             try:
                 hdr = parse_header(header64)
                 print(f"[LIVE] first packet decoded: RS_OK={pkt0_rs_ok} header={header64[:16].hex()}")
+                
+                # Проверяем валидность заголовка
+                if not hdr.get('is_valid', False):
+                    print(f"[LIVE] Invalid header (is_valid=False), discarding packet")
+                    globals()['rx'] = globals_backup['rx']
+                    globals()['abs_corr'] = globals_backup['abs_corr']
+                    audio.stop()
+                    return
                 
                 # Используем модуляцию из заголовка
                 modulation_from_header = hdr.get('modulation', 'QPSK')
@@ -822,12 +840,14 @@ def live_receive_and_process():
                 
                 try:
                     hdr_crc = hdr.get('crc32', None)
-                    if hdr_crc is not None:
+                    if hdr_crc is not None and hdr_crc != 0:  # Запрещаем нулевой CRC
                         calc_crc = zlib.crc32(assembled) & 0xFFFFFFFF
                         if calc_crc == int(hdr_crc):
                             print(f"[RX-CRC] OK: CRC32 matched (0x{calc_crc:08X})")
                         else:
                             print(f"[RX-CRC] MISMATCH: received 0x{int(hdr_crc):08X}, calculated 0x{calc_crc:08X}")
+                    else:
+                        print(f"[RX-CRC] SKIP: CRC is 0 or None, skipping CRC check")
                 except Exception as e:
                     print("[RX-CRC] crc check failed:", e)
                 
