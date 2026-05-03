@@ -55,6 +55,16 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
     if 'abs_corr' not in globals() or 'rx' not in globals():
         return None
     
+    # Определяем параметры для конкретной модуляции
+    if modulation == "BPSK":
+        bits_per_symbol = 1
+        ofdm_symbols_per_block = 2  # 2 физических символа = 1 логический блок для BPSK
+        bits_per_ofdm_symbol = Nsub * bits_per_symbol  # 48 для BPSK
+    else:  # QPSK
+        bits_per_symbol = 2
+        ofdm_symbols_per_block = 1  # 1 физический символ = 1 логический блок для QPSK
+        bits_per_ofdm_symbol = Nsub * bits_per_symbol  # 96 для QPSK
+    
     try:
         # Оценка частотной ошибки и канала (общая для всех модуляций)
         zc_seq_ideal = (np.exp(-1j * np.pi * 1 * np.arange(Nsub) * (np.arange(Nsub) + 1) / float(Nsub)))
@@ -119,7 +129,7 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         packet_gain = 1.0
     
     # Переводим логические блоки в физические символы
-    physical_symbols_expected = packet_blocks_expected * modem_config.OFDM_SYMBOLS_PER_BLOCK
+    physical_symbols_expected = packet_blocks_expected * ofdm_symbols_per_block
     
     pkt_data_start = pref_abs + len(preamble_td)
     pkt_payload_samples = physical_symbols_expected * SYMBOL_LEN
@@ -175,8 +185,8 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         bits_pkt = qpsk_demap(rx_syms_pkt)
         print(f"[RX] Using {modulation} demapping")
     
-    # Применяем деинтерливинг
-    bits_pkt = deinterleave_bits(bits_pkt, block_size=modem_config.BITS_PER_OFDM_SYMBOL)
+    # Применяем деинтерливинг с правильным размером блока для данной модуляции
+    bits_pkt = deinterleave_bits(bits_pkt, block_size=bits_per_ofdm_symbol)
     
     # RS декодирование
     cw_bits = RS_CW_BITS
@@ -557,7 +567,9 @@ def live_receive_and_process():
             cand_abs = peak_idx
             packet_blocks_guess = DEFAULT_PACKET_BLOCKS
             # Переводим логические блоки в физические символы для расчета общего количества сэмплов
-            physical_symbols_guess = packet_blocks_guess * modem_config.OFDM_SYMBOLS_PER_BLOCK
+            # Используем максимальное значение OFDM_SYMBOLS_PER_BLOCK (для BPSK это 2)
+            # чтобы гарантировать, что мы прочитаем достаточно данных
+            physical_symbols_guess = packet_blocks_guess * 2  # максимум для BPSK
             needed_total = cand_abs + pre_len + physical_symbols_guess * SYMBOL_LEN + SYMBOL_LEN
             
             if not wait_for_samples(needed_total, timeout=10.0):
@@ -583,7 +595,8 @@ def live_receive_and_process():
             print(f"[LIVE] first preamble candidate found: peak={peak_val:.3f} cand={cand_abs} refined={refined_abs}")
             
             # Переводим логические блоки в физические символы
-            physical_symbols_refined = packet_blocks_guess * modem_config.OFDM_SYMBOLS_PER_BLOCK
+            # Используем максимальное значение OFDM_SYMBOLS_PER_BLOCK (для BPSK это 2)
+            physical_symbols_refined = packet_blocks_guess * 2  # максимум для BPSK
             needed_total_refined = refined_abs + pre_len + physical_symbols_refined * SYMBOL_LEN + SYMBOL_LEN
             if not wait_for_samples(needed_total_refined, timeout=10.0):
                 print("[LIVE] waiting for more samples for refined packet timed out, continue scanning")
@@ -664,6 +677,7 @@ def live_receive_and_process():
                 for pkt_idx, pref in enumerate(expected_abs):
                     pref_backoff = max(0, pref - SYMBOL_LEN)
                     # Переводим логические блоки в физические символы
+                    # Используем текущее значение OFDM_SYMBOLS_PER_BLOCK (обновляется после определения модуляции)
                     physical_symbols_val = packet_blocks_val * modem_config.OFDM_SYMBOLS_PER_BLOCK
                     needed_for_pkt = pref_backoff + SYMBOL_LEN + pre_len + physical_symbols_val * SYMBOL_LEN + SYMBOL_LEN
                     if not wait_for_samples(needed_for_pkt, timeout=20.0):
