@@ -1147,6 +1147,20 @@ def _plot_results():
                 )
             _rx_st.rx_constellation_symbols.clear()
 
+        # Сохраняем водопадную диаграмму эквалайзера
+        try:
+            from rx_decoder import save_equalizer_waterfall
+            if _rx_st.equalizer_history_list and len(_rx_st.equalizer_history_list) > 0:
+                result = save_equalizer_waterfall()
+                if result:
+                    print("[SP-PLOT] Водопадная диаграмма эквалайзера сохранена")
+                else:
+                    print("[SP-PLOT] Водопадная диаграмма не была сохранена (нет данных или ошибка)")
+            else:
+                print("[SP-PLOT] Нет данных истории эквалайзера для сохранения водопада")
+        except Exception as e:
+            print(f"[SP-PLOT] Не удалось сохранить водопад эквалайзера: {e}")
+
     except Exception as e:
         print(f"[SP-PLOT] Ошибка при построении графиков: {e}")
 

@@ -19,6 +19,14 @@ from modem_packet import parse_header, build_header, make_packet_header_bytes, s
 # Импортируем модуль состояния
 import rx_state as _rx_st
 
+# Импортируем модуль водопадной диаграммы (headless, без отображения окон)
+try:
+    from equalizer_waterfall import EqualizerWaterfall, PLOTTING_AVAILABLE as WF_AVAILABLE
+except ImportError:
+    EqualizerWaterfall = None
+    WF_AVAILABLE = False
+    print("[RX] equalizer_waterfall не импортирован, водопад отключён")
+
 # Проверка что rx_state импортирован корректно
 assert hasattr(_rx_st, 'reset_state'), "rx_state должен содержать reset_state()"
 assert hasattr(_rx_st, '_rs_fail_prints_count'), "rx_state должен содержать _rs_fail_prints_count"
@@ -35,12 +43,13 @@ assert hasattr(_rx_st, 'rx_constellation_symbols'), "rx_state должен со�
 # -----------------------
 # Вспомогательная функция для декодирования с конкретной модуляцией
 # -----------------------
-def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, bytes_before_packet, expected_total, modulation):
+def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, bytes_before_packet, expected_total, modulation, show_waterfall=False):
     """
     Попытка декодирования пакета с конкретной модуляцией.
     Использует отдельный экземпляр эквалайзера для каждой попытки.
     
     packet_blocks_expected - количество ЛОГИЧЕСКИХ блоков.
+    show_waterfall - если True, показывать водопадную диаграмму эквалайзера в реальном времени.
     
     Возвращает (decoded_bytes, rs_ok_count, used_preamble, equalizer_instance) или None при ошибке.
     """
@@ -108,6 +117,22 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         equalizer = AdaptiveEqualizer(initial_Hk=Hk_s, alpha=0.02, modulation=modulation)
         print(f"[EQ] Modulation {modulation}: AdaptiveEqualizer initialized with alpha=0.02")
         
+        # Создаём визуализацию водопадной диаграммы (если запрошена)
+        waterfall = None
+        if show_waterfall:
+            try:
+                from equalizer_waterfall import EqualizerWaterfall
+                waterfall = EqualizerWaterfall(
+                    max_symbols=500,
+                    title_prefix=f"EQ Waterfall pkt={packet_idx} mod={modulation}"
+                )
+                # Показываем начальное состояние Hk
+                waterfall.update(equalizer.get_current_Hk())
+                print(f"[EQ-WF] Водопадная диаграмма создана для pkt={packet_idx} mod={modulation}")
+            except Exception as e:
+                print(f"[EQ-WF] Ошибка создания водопадной диаграммы: {e}")
+                waterfall = None
+        
     except Exception as e:
         print(f"[RX-DBG-DECODE] Exception in channel estimation for {modulation}: {e}")
         return None
@@ -165,6 +190,21 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
             subc = equalizer.process(F[subc_inds])
         except Exception:
             subc = np.zeros(Nsub, dtype=complex)
+
+        # Сохраняем текущее состояние Hk в историю эквалайзера для водопадной диаграммы
+        try:
+            _rx_st.equalizer_history_list.append(equalizer.get_current_Hk().copy())
+            print(f"[EQ-HIST] Сохранен снимок Hk #{len(_rx_st.equalizer_history_list)} "
+                  f"для символа {idxf} пакета {packet_idx}")
+        except Exception as e:
+            print(f"[EQ-HIST] Ошибка сохранения Hk: {e}")
+        
+        # Обновляем водопадную диаграмму эквалайзера (если включена)
+        if waterfall is not None:
+            try:
+                waterfall.update(equalizer.get_current_Hk())
+            except Exception as e:
+                print(f"[EQ-WF] Ошибка обновления водопада: {e}")
         
         if modem_config.subc_phases is not None and np.any(modem_config.subc_phases != 0):
             subc = subc * np.exp(-1j * modem_config.subc_phases)
@@ -215,6 +255,14 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
             msg = b'\x00' * RS_DATA_BYTES
             decoded_blocks.append((msg, False))  # Ошибка декодирования
     
+    # Закрываем водопадную диаграмму если она была создана
+    if waterfall is not None:
+        try:
+            waterfall.close()
+            print(f"[EQ-WF] Водопадная диаграмма закрыта для pkt={packet_idx}")
+        except Exception as e:
+            print(f"[EQ-WF] Ошибка закрытия водопада: {e}")
+
     # Возвращаем результат с экземпляром эквалайзера
     return (decoded_blocks, rs_ok, pref_abs, equalizer)
 
@@ -222,10 +270,11 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
 # -----------------------
 # decode_packet_at_candidate
 # -----------------------
-def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, bytes_before_packet=0, expected_total=0):
+def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, bytes_before_packet=0, expected_total=0, show_waterfall=False):
     """Декодирование пакета по кандидату синхронизации.
     
     packet_blocks_expected - количество ЛОГИЧЕСКИХ блоков.
+    show_waterfall - если True, показывать водопадную диаграмму эквалайзера в реальном времени.
     """
     best_result = (b'', 0, None)
     
@@ -244,7 +293,7 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
         
         for try_mod in ["QPSK", "BPSK"]:
             print(f"[RX] Trying {try_mod} modulation...")
-            result = _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, bytes_before_packet, expected_total, try_mod)
+            result = _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, bytes_before_packet, expected_total, try_mod, show_waterfall=show_waterfall)
             if result is not None:
                 decoded_blocks, rs_ok, used_pre, eq_instance = result
                 print(f"[RX] {try_mod}: RS_OK={rs_ok}, blocks={len(decoded_blocks)}")
@@ -314,7 +363,7 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
         modulation = modem_config.MODULATION
         print(f"[RX] Packet {packet_idx}: using known modulation {modulation}")
         
-        result = _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, bytes_before_packet, expected_total, modulation)
+        result = _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, bytes_before_packet, expected_total, modulation, show_waterfall=show_waterfall)
         if result is not None:
             decoded_blocks, rs_ok, used_pre, eq_instance = result
             
@@ -325,3 +374,53 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
             return ret_bytes, rs_ok, used_pre
         else:
             return best_result
+
+
+# -----------------------
+# Функция автосохранения водопадной диаграммы эквалайзера
+# -----------------------
+def save_equalizer_waterfall(filename="rx_equalizer_waterfall.png"):
+    """
+    Сохраняет водопадную диаграмму эквалайзера в PNG файл.
+    
+    Использует equalizer_history_list из rx_state для построения водопада.
+    Вызывается автоматически по окончании приёма всех пакетов.
+    
+    :param filename: Имя файла для сохранения (по умолчанию 'rx_equalizer_waterfall.png').
+    :return: True если сохранение успешно, False в случае ошибки.
+    """
+    if not WF_AVAILABLE or EqualizerWaterfall is None:
+        print("[RX-WF] Водопад эквалайзера отключён (модуль недоступен)")
+        return False
+    
+    if not _rx_st.equalizer_history_list or len(_rx_st.equalizer_history_list) == 0:
+        print("[RX-WF] Нет данных истории эквалайзера для сохранения")
+        return False
+    
+    try:
+        print(f"[RX-WF] Сохранение водопадной диаграммы эквалайзера: {filename}")
+        
+        # Создаём экземпляр водопада
+        waterfall = EqualizerWaterfall(
+            max_symbols=500,
+            title_prefix="Equalizer Waterfall"
+        )
+        
+        # Загружаем историю эквалайзера
+        waterfall.update_from_history(_rx_st.equalizer_history_list)
+        
+        # Сохраняем в файл
+        result = waterfall.save(filename)
+        
+        if result:
+            print(f"[RX-WF] Водопадная диаграмма успешно сохранена: {filename}")
+        else:
+            print(f"[RX-WF] Ошибка сохранения водопадной диаграммы")
+        
+        return result
+        
+    except Exception as e:
+        print(f"[RX-WF] Ошибка при сохранении водопада: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
