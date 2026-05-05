@@ -236,8 +236,26 @@ def ace_reduce_peaks(ds, Nfft_local, subc_inds_local):
 # -----------------------
 # OFDM symbol build
 # -----------------------
-def ofdm_symbol(data_syms):
-    """Сборка OFDM символа из поднесущих."""
+def ofdm_symbol(data_syms, return_fd=False):
+    """
+    Сборка OFDM символа из поднесущих.
+    
+    Параметры
+    ----------
+    data_syms : array-like
+        Комплексные символы поднесущих (длина Nsub)
+    return_fd : bool
+        Если True, также вернуть поднесущие в частотной области
+        после всех обработок (нормализация, ACE, фазы), но до IFFT.
+        Это используется для визуализации созвездия после OFDM.
+    
+    Возвращает
+    -------
+    td_samples : ndarray
+        Временной сигнал OFDM символа (с CP)
+    fd_symbols : ndarray (только если return_fd=True)
+        Комплексные поднесущие в частотной области (длина Nsub)
+    """
     if len(data_syms) < Nsub:
         ds = np.concatenate((data_syms, np.zeros(Nsub - len(data_syms), dtype=complex)))
     else:
@@ -257,6 +275,9 @@ def ofdm_symbol(data_syms):
     if modem_config.subc_phases is not None and np.any(modem_config.subc_phases != 0):
         ds = ds * np.exp(1j * modem_config.subc_phases)
 
+    # Сохраняем копию FD символов до IFFT для созвездия
+    fd_symbols = ds.copy()
+
     X = np.zeros(Nfft, dtype=complex)
     X[subc_inds] = ds
     X[-subc_inds] = np.conj(ds)
@@ -265,6 +286,9 @@ def ofdm_symbol(data_syms):
         X[Nfft//2] = X[Nfft//2].real
     x = np.fft.ifft(X)
     x = np.real(x)
+    
+    if return_fd:
+        return np.concatenate((x[-Ncp:], x)), fd_symbols
     return np.concatenate((x[-Ncp:], x))
 
 # -----------------------
@@ -296,7 +320,7 @@ def build_preamble(reps=1, zc_root=1):
     preamble = preamble / cur_rms * SYMBOL_TX_TARGET
     return preamble
 
-def build_data_td(bits):
+def build_data_td(bits, collect_fd=False):
     """
     Сборка модулированных данных во временную область.
     
@@ -311,9 +335,23 @@ def build_data_td(bits):
     - Для формирования одного RS слова (96 бит) требуется 2 OFDM символа BPSK
     - BPSK96 (будущая поддержка): 96 поднесущих × 1 бит = 96 бит/OFDM символ
     
-    Возвращает:
-    - td: сигнал во временной области (все OFDM символы подряд)
-    - nblocks: количество OFDM символов
+    Параметры
+    ----------
+    bits : array-like
+        Битовый поток для модуляции
+    collect_fd : bool
+        Если True, также собирать поднесущие в частотной области
+        после всех обработок (нормализация, ACE, фазы), но до IFFT.
+        Используется для визуализации созвездия после OFDM.
+    
+    Возвращает
+    -------
+    td : ndarray
+        Сигнал во временной области (все OFDM символы подряд)
+    nblocks : int
+        Количество OFDM символов
+    fd_symbols : ndarray (только если collect_fd=True)
+        Плоский массив комплексных поднесущих всех OFDM символов
     """
     if modem_config.MODULATION == "BPSK":
         syms = bpsk_map(bits)
@@ -323,8 +361,21 @@ def build_data_td(bits):
     if pad:
         syms = np.concatenate((syms, np.zeros(pad, dtype=complex)))
     blk = syms.reshape(-1, Nsub)
-    td = [ofdm_symbol(b) for b in blk]
-    return np.concatenate(td), blk.shape[0]
+    
+    if collect_fd:
+        # Собираем FD символы для созвездия
+        td_list = []
+        fd_list = []
+        for b in blk:
+            td_sym, fd_sym = ofdm_symbol(b, return_fd=True)
+            td_list.append(td_sym)
+            fd_list.append(fd_sym)
+        td = np.concatenate(td_list)
+        fd_symbols = np.concatenate(fd_list)
+        return td, blk.shape[0], fd_symbols
+    else:
+        td = [ofdm_symbol(b) for b in blk]
+        return np.concatenate(td), blk.shape[0]
 
 # -----------------------
 # Habr optimizer (unchanged)

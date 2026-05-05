@@ -33,6 +33,7 @@ from modem_config import (
     RS_CW_BITS, RS_DATA_BYTES, RS_CW_BYTES, rs,
     SYMBOL_TARGET_RMS, AGC_ALPHA, AGC_DEBUG, MIN_RMS,
     PLOTTING_AVAILABLE, _MAX_RS_FAIL_PRINTS_GLOBAL, SYNC_WINDOW_HALF,
+    PLOT_CONSTELLATION, CONSTELLATION_RX_FILENAME, CONSTELLATION_USE_GRADIENT,
 )
 
 from modem_modulation import build_preamble
@@ -1136,8 +1137,14 @@ def _plot_results():
         if _rx_st.rx_constellation_symbols and len(_rx_st.rx_constellation_symbols) > 0:
             print(f"[SP-PLOT] Построение созвездия с "
                   f"{len(_rx_st.rx_constellation_symbols)} символами...")
-            plot_constellation(_rx_st.rx_constellation_symbols,
-                               "RX Constellation (gradient)", use_gradient=True)
+            if PLOT_CONSTELLATION:
+                plot_constellation(
+                    _rx_st.rx_constellation_symbols,
+                    title="RX Constellation",
+                    filename=CONSTELLATION_RX_FILENAME,
+                    use_gradient=CONSTELLATION_USE_GRADIENT,
+                    modulation_type=modem_config.MODULATION
+                )
             _rx_st.rx_constellation_symbols.clear()
 
     except Exception as e:

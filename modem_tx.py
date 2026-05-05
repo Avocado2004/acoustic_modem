@@ -13,7 +13,12 @@ from modem_config import (fs, Nfft, Ncp, Nsub, subc_inds,
                            GAP_SAMPLES_DEFAULT, MAX_PAYLOAD_SIZE, RS_DATA_BYTES,
                            RS_CW_BYTES, RS_CW_BITS, rs, SYMBOL_TX_TARGET,
                            TARGET_RMS, MIN_RMS, SYMBOL_TARGET_RMS, AGC_ALPHA,
-                           AGC_DEBUG, PLOTTING_AVAILABLE, plt)
+                           AGC_DEBUG, PLOTTING_AVAILABLE, plt,
+                           PLOT_CONSTELLATION, CONSTELLATION_TX_FILENAME,
+                           CONSTELLATION_USE_GRADIENT,
+                           PLOT_CONSTELLATION_TX_OFDM, CONSTELLATION_TX_OFDM_FILENAME,
+                           CONSTELLATION_TX_OFDM_COMPENSATE_PHASE,
+                           CONSTELLATION_TX_OFDM_COMPENSATED_FILENAME)
 from modem_modulation import (qpsk_map, bpsk_map, bytes_to_bits, bits_to_bytes,
                                ofdm_symbol, build_preamble, build_data_td, zc_root_sequence,
                                interleave_bits)
@@ -105,6 +110,166 @@ def transmit_file(file_path, packet_blocks=DEFAULT_PACKET_BLOCKS):
         file_data = f.read()
     total_data_len = file_size
     return _transmit_data(file_data, total_data_len, filename_bytes, mode='F', packet_blocks=packet_blocks)
+
+
+def _collect_tx_constellation_symbols(data_bytes, header_bytes, filename_bytes, mode, packet_blocks):
+    """
+    Сбор символов созвездия на стороне передачи (TX).
+    
+    Выполняет модуляцию данных и собирает комплексные символы (I+Qj)
+    для последующей визуализации созвездия.
+    
+    Параметры
+    ----------
+    data_bytes : bytes
+        Данные для передачи
+    header_bytes : bytes
+        Заголовок передачи (тройной для первого пакета)
+    filename_bytes : bytes
+        Имя файла (пустое для текста)
+    mode : str
+        Режим передачи ('T' для текста, 'F' для файла)
+    packet_blocks : int
+        Количество логических блоков в пакете
+    
+    Возвращает
+    -------
+    list
+        Список комплексных символов созвездия
+    """
+    constellation_symbols = []
+    
+    try:
+        # Определяем параметры модуляции
+        modulation = modem_config.MODULATION
+        bits_per_symbol = modem_config.BITS_PER_SYMBOL
+        ofdm_symbols_per_block = modem_config.OFDM_SYMBOLS_PER_BLOCK
+        
+        # Собираем все байты для передачи (заголовок + данные)
+        all_bytes = header_bytes + data_bytes
+        
+        # Разбиваем на блоки по RS_DATA_BYTES
+        blocks = [all_bytes[i:i+RS_DATA_BYTES] for i in range(0, len(all_bytes), RS_DATA_BYTES)]
+        if len(blocks[-1]) < RS_DATA_BYTES:
+            blocks[-1] += b'\x00' * (RS_DATA_BYTES - len(blocks[-1]))
+        
+        # RS кодирование
+        encoded_blocks = [rs.encode(b) for b in blocks]
+        
+        # Преобразуем в биты
+        all_bits = []
+        for enc_block in encoded_blocks:
+            all_bits.extend(bytes_to_bits(enc_block))
+        
+        # Применяем интерливинг
+        all_bits = interleave_bits(all_bits, block_size=modem_config.BITS_PER_OFDM_SYMBOL)
+        
+        # Модулируем биты в символы
+        n_sub = Nsub
+        
+        if modulation == "BPSK":
+            # BPSK: 1 бит на поднесущую
+            for i in range(0, len(all_bits), n_sub):
+                bits_chunk = all_bits[i:i+n_sub]
+                if len(bits_chunk) < n_sub:
+                    bits_chunk = np.concatenate([bits_chunk, np.zeros(n_sub - len(bits_chunk), dtype=int)])
+                
+                # BPSK модуляция: 0 -> +1, 1 -> -1
+                symbols = 1 - 2 * bits_chunk.astype(complex)
+                constellation_symbols.extend(symbols)
+        else:
+            # QPSK: 2 бита на поднесущую
+            for i in range(0, len(all_bits), n_sub * 2):
+                bits_chunk = all_bits[i:i+n_sub*2]
+                if len(bits_chunk) < n_sub * 2:
+                    bits_chunk = np.concatenate([bits_chunk, np.zeros(n_sub * 2 - len(bits_chunk), dtype=int)])
+                
+                # QPSK модуляция
+                symbols = []
+                for j in range(0, len(bits_chunk), 2):
+                    b0, b1 = bits_chunk[j], bits_chunk[j+1]
+                    # QPSK созвездие: (1+1j), (1-1j), (-1+1j), (-1-1j)
+                    real = 1 - 2*b0
+                    imag = 1 - 2*b1
+                    symbols.append(complex(real, imag))
+                
+                # Нормализация
+                symbols = np.array(symbols) / np.sqrt(2)
+                constellation_symbols.extend(symbols)
+        
+        print(f"[TX-CONSTELLATION] Collected {len(constellation_symbols)} symbols for TX constellation")
+        
+    except Exception as e:
+        print(f"[TX-CONSTELLATION] Error collecting symbols: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return constellation_symbols
+
+
+def _collect_tx_ofdm_constellation_symbols(data_bytes, header_bytes, filename_bytes, mode, packet_blocks):
+    """
+    Сбор символов созвездия после OFDM-модуляции (FD символы до IFFT).
+    
+    Выполняет полную цепочку модуляции (RS-кодирование, интерливинг, BPSK/QPSK,
+    OFDM-модуляция) и собирает комплексные поднесущие в частотной области
+    после всех обработок (нормализация, ACE, фазы), но до IFFT.
+    
+    Параметры
+    ----------
+    data_bytes : bytes
+        Данные для передачи
+    header_bytes : bytes
+        Заголовок передачи (тройной для первого пакета)
+    filename_bytes : bytes
+        Имя файла (пустое для текста)
+    mode : str
+        Режим передачи ('T' для текста, 'F' для файла)
+    packet_blocks : int
+        Количество логических блоков в пакете
+    
+    Возвращает
+    -------
+    list
+        Список комплексных символов созвездия после OFDM-обработки
+    """
+    ofdm_constellation_symbols = []
+    
+    try:
+        # Собираем все байты для передачи (заголовок + данные)
+        all_bytes = header_bytes + data_bytes
+        
+        # Разбиваем на блоки по RS_DATA_BYTES
+        blocks = [all_bytes[i:i+RS_DATA_BYTES] for i in range(0, len(all_bytes), RS_DATA_BYTES)]
+        if len(blocks[-1]) < RS_DATA_BYTES:
+            blocks[-1] += b'\x00' * (RS_DATA_BYTES - len(blocks[-1]))
+        
+        # RS кодирование
+        encoded_blocks = [rs.encode(b) for b in blocks]
+        
+        # Преобразуем в биты
+        all_bits = []
+        for enc_block in encoded_blocks:
+            all_bits.extend(bytes_to_bits(enc_block))
+        
+        # Применяем интерливинг
+        all_bits = interleave_bits(all_bits, block_size=modem_config.BITS_PER_OFDM_SYMBOL)
+        
+        # Вызываем build_data_td с collect_fd=True для сбора FD символов
+        if len(all_bits) > 0:
+            _, n_symbols, fd_symbols = build_data_td(all_bits, collect_fd=True)
+            ofdm_constellation_symbols = list(fd_symbols)
+            print(f"[TX-OFDM-CONSTELLATION] Collected {len(ofdm_constellation_symbols)} FD symbols "
+                  f"from {n_symbols} OFDM symbols (modulation={modem_config.MODULATION})")
+        else:
+            print("[TX-OFDM-CONSTELLATION] No bits to process")
+        
+    except Exception as e:
+        print(f"[TX-OFDM-CONSTELLATION] Error collecting OFDM symbols: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return ofdm_constellation_symbols
 
 
 def _transmit_data(data_bytes, total_data_len, filename_bytes, mode='T', packet_blocks=DEFAULT_PACKET_BLOCKS):
@@ -271,6 +436,75 @@ def _transmit_data(data_bytes, total_data_len, filename_bytes, mode='T', packet_
             plot_tx_diagrams(tx_clipped, fs)
         except Exception as e:
             print(f"[TX] Ошибка при сохранении диаграмм: {e}")
+    
+    # Сохраняем созвездие передачи (TX constellation diagram) - идеальное (до OFDM)
+    if PLOTTING_AVAILABLE and PLOT_CONSTELLATION:
+        try:
+            from plot_utils import plot_constellation
+            # Собираем все символы передачи для визуализации
+            tx_constellation_symbols = _collect_tx_constellation_symbols(
+                data_bytes, transmission_header, filename_bytes, mode, packet_blocks
+            )
+            if tx_constellation_symbols and len(tx_constellation_symbols) > 0:
+                plot_constellation(
+                    tx_constellation_symbols,
+                    title="TX Constellation",
+                    filename=CONSTELLATION_TX_FILENAME,
+                    use_gradient=CONSTELLATION_USE_GRADIENT,
+                    modulation_type=modem_config.MODULATION
+                )
+                print(f"[TX] Constellation diagram saved to {CONSTELLATION_TX_FILENAME}")
+        except Exception as e:
+            print(f"[TX] Ошибка при сохранении созвездия: {e}")
+    
+    # Сохраняем созвездие после OFDM-модуляции (FD символы до IFFT, до soft clipping)
+    if PLOTTING_AVAILABLE and PLOT_CONSTELLATION and PLOT_CONSTELLATION_TX_OFDM:
+        try:
+            from plot_utils import plot_constellation
+            # Собираем FD символы после OFDM-обработки
+            tx_ofdm_constellation_symbols = _collect_tx_ofdm_constellation_symbols(
+                data_bytes, transmission_header, filename_bytes, mode, packet_blocks
+            )
+            if tx_ofdm_constellation_symbols and len(tx_ofdm_constellation_symbols) > 0:
+                plot_constellation(
+                    tx_ofdm_constellation_symbols,
+                    title="TX Constellation (after OFDM, before clipping)",
+                    filename=CONSTELLATION_TX_OFDM_FILENAME,
+                    use_gradient=CONSTELLATION_USE_GRADIENT,
+                    modulation_type=modem_config.MODULATION
+                )
+                print(f"[TX] OFDM constellation diagram saved to {CONSTELLATION_TX_OFDM_FILENAME}")
+                
+                # Сохраняем компенсированное созвездие (без начального фазового сдвига)
+                if CONSTELLATION_TX_OFDM_COMPENSATE_PHASE:
+                    print(f"[TX] Generating phase-compensated OFDM constellation diagram...")
+                    
+                    # Получаем фазы поднесущих из modem_config
+                    subc_phases = modem_config.subc_phases
+                    
+                    if subc_phases is not None and len(subc_phases) > 0:
+                        # Повторяем фазы для всех OFDM символов
+                        n_ofdm_symbols = len(tx_ofdm_constellation_symbols) // Nsub
+                        phases_repeated = np.tile(subc_phases, n_ofdm_symbols)
+                        
+                        print(f"[TX] Applying phase compensation: {len(tx_ofdm_constellation_symbols)} symbols, "
+                              f"{n_ofdm_symbols} OFDM symbols, {len(phases_repeated)} phases")
+                        
+                        plot_constellation(
+                            tx_ofdm_constellation_symbols,
+                            title="TX Constellation (after OFDM, phase compensated)",
+                            filename=CONSTELLATION_TX_OFDM_COMPENSATED_FILENAME,
+                            use_gradient=CONSTELLATION_USE_GRADIENT,
+                            modulation_type=modem_config.MODULATION,
+                            phase_compensation=phases_repeated
+                        )
+                        print(f"[TX] Phase-compensated OFDM constellation saved to {CONSTELLATION_TX_OFDM_COMPENSATED_FILENAME}")
+                    else:
+                        print(f"[TX] Warning: subc_phases is None or empty, skipping phase compensation")
+        except Exception as e:
+            print(f"[TX] Ошибка при сохранении OFDM созвездия: {e}")
+            import traceback
+            traceback.print_exc()
     
     max_abs = np.max(np.abs(tx_clipped)) if tx_clipped.size else 0.0
     if max_abs == 0:

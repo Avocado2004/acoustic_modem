@@ -21,44 +21,207 @@ if not IS_MOBILE:
 else:
     print("[PLOT] Mobile platform detected, plotting disabled")
 
-def plot_constellation(symb, title="Constellation"):
+
+def compensate_phase(symbols, phases):
     """
-    Plot or save constellation data.
-    On mobile platforms, saves data to CSV instead of plotting.
+    Компенсация фазового сдвига в символах.
+    
+    Вычитает из каждого символа соответствующую фазу поднесущей,
+    умножая на exp(-j * phase). Это позволяет убрать начальный фазовый
+    сдвиг (Schroeder, Habr) и увидеть только влияние ACE и других обработок.
+    
+    Параметры
+    ----------
+    symbols : array-like
+        Массив комплексных символов (поднесущие)
+    phases : array-like
+        Массив фаз поднесущих (из modem_config.subc_phases)
+    
+    Возвращает
+    -------
+    numpy.ndarray
+        Компенсированные символы
+    
+    Примеры использования
+    ---------------------
+    # Компенсация фазы
+    compensated = compensate_phase(symbols, subc_phases)
+    
+    # Без компенсации (phases=None)
+    original = compensate_phase(symbols, None)
+    """
+    import numpy as np
+    
+    symbols = np.asarray(symbols, dtype=complex)
+    
+    if phases is None or len(phases) == 0:
+        print("[PHASE-COMP] No phases provided, returning original symbols")
+        return symbols
+    
+    phases = np.asarray(phases)
+    
+    # Проверяем длины массивов
+    n_symbols = len(symbols)
+    n_phases = len(phases)
+    
+    if n_symbols != n_phases:
+        print(f"[PHASE-COMP] Warning: symbols length ({n_symbols}) != phases length ({n_phases})")
+        # Используем минимальную длину
+        min_len = min(n_symbols, n_phases)
+        symbols = symbols[:min_len]
+        phases = phases[:min_len]
+    
+    # Компенсируем фазу: умножаем на exp(-j * phase)
+    compensation = np.exp(-1j * phases)
+    compensated = symbols * compensation
+    
+    print(f"[PHASE-COMP] Compensated {len(symbols)} symbols with phase compensation")
+    
+    return compensated
+
+
+def plot_constellation(symb, title="Constellation", filename=None, use_gradient=False, modulation_type="", phase_compensation=None):
+    """
+    Отрисовка созвездия (constellation diagram) с опциональным градиентом цвета.
+    
+    Параметры
+    ----------
+    symb : array-like
+        Список комплексных символов (I+Qj) для отрисовки
+    title : str
+        Заголовок графика
+    filename : str, optional
+        Имя файла для сохранения. Если None - генерируется из title
+    use_gradient : bool
+        Если True - используется градиент цвета от синего (начало) к красному (конец)
+    modulation_type : str
+        Тип модуляции ('BPSK' или 'QPSK') для информации в заголовке
+    phase_compensation : array-like, optional
+        Массив фаз для компенсации фазового сдвига. Если None - компенсация не применяется.
+        Используется для визуализации созвездия без начального фазового сдвига (Schroeder/Habr).
+    
+    Возвращает
+    -------
+    bool
+        True если график успешно сохранен, False в случае ошибки
+    
+    Примеры использования
+    ---------------------
+    # Простая отрисовка без градиента:
+    plot_constellation(symbols, "RX Constellation")
+    
+    # С градиентом цвета:
+    plot_constellation(symbols, "TX Constellation", use_gradient=True, modulation_type="QPSK")
+    
+    # С компенсацией фазы:
+    plot_constellation(symbols, "TX OFDM (phase compensated)", phase_compensation=subc_phases)
     """
     if not PLOTTING_AVAILABLE or plt is None:
-        # On mobile or when matplotlib is not available, save data to file
+        # На мобильных платформах или при отсутствии matplotlib сохраняем данные в CSV
         try:
             import numpy as np
             data = np.column_stack((np.real(symb), np.imag(symb)))
-            filename = title.replace(" ", "_") + "_data.csv"
-            np.savetxt(filename, data, delimiter=",", header="I,Q", comments="")
-            print(f"[PLOT] Constellation data saved to {filename}")
+            csv_filename = (filename if filename else title.replace(" ", "_")) + "_data.csv"
+            np.savetxt(csv_filename, data, delimiter=",", header="I,Q", comments="")
+            print(f"[PLOT] Constellation data saved to {csv_filename}")
         except Exception as e:
             print(f"[PLOT] Failed to save constellation data: {e}")
-        return
+        return False
     
     try:
         import numpy as np
-        plt.figure(figsize=(5, 5))
-        plt.plot(np.real(symb), np.imag(symb), 'o', markersize=2, alpha=0.6)
-        plt.axhline(0, color='grey', linewidth=0.5)
-        plt.axvline(0, color='grey', linewidth=0.5)
-        plt.title(title)
-        plt.xlabel("In-phase")
-        plt.ylabel("Quadrature")
-        plt.grid(True)
-        plt.axis('equal')
-        # Save to file instead of showing
-        try:
+        from matplotlib.colors import LinearSegmentedColormap
+        
+        # Преобразуем в numpy массив если нужно
+        symb = np.asarray(symb, dtype=complex)
+        n_symbols = len(symb)
+        
+        # Применяем компенсацию фазы если переданы фазы
+        if phase_compensation is not None:
+            symb = compensate_phase(symb, phase_compensation)
+            title = title + " [phase compensated]"
+            print(f"[PLOT-CONSTELLATION] Phase compensation applied")
+        
+        print(f"[PLOT-CONSTELLATION] Plotting {n_symbols} symbols, gradient={use_gradient}, modulation={modulation_type}")
+        
+        # Создаем фигуру
+        fig, ax = plt.subplots(figsize=(8, 8))
+        
+        if use_gradient and n_symbols > 1:
+            # Создаем цветовую карту от синего к красному
+            colors = [(0, 0, 1), (1, 0, 0)]  # синий -> красный
+            cmap = LinearSegmentedColormap.from_list('blue_to_red', colors, N=n_symbols)
+            
+            # Индексы для градиента (от 0 до 1)
+            indices = np.linspace(0, 1, n_symbols)
+            
+            # Рисуем точки с градиентом
+            for i, (symbol, idx) in enumerate(zip(symb, indices)):
+                color = cmap(idx)
+                ax.scatter(symbol.real, symbol.imag, color=color, alpha=0.6, s=20, edgecolors='none')
+            
+            # Добавляем цветовую шкалу
+            sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=n_symbols))
+            sm.set_array([])
+            cbar = plt.colorbar(sm, ax=ax, label='Symbol Index', shrink=0.8)
+            cbar.set_ticks([0, n_symbols // 2, n_symbols])
+            cbar.set_ticklabels(['Start', 'Middle', 'End'])
+            
+            print(f"[PLOT-CONSTELLATION] Gradient applied: blue (start) -> red (end)")
+        else:
+            # Простая отрисовка без градиента
+            ax.plot(np.real(symb), np.imag(symb), 'o', markersize=2, alpha=0.6, color='blue')
+            print(f"[PLOT-CONSTELLATION] Simple plot without gradient")
+        
+        # Настройка осей
+        ax.axhline(y=0, color='k', linestyle='-', alpha=0.3, linewidth=0.5)
+        ax.axvline(x=0, color='k', linestyle='-', alpha=0.3, linewidth=0.5)
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.set_xlabel('In-phase (I)', fontsize=12)
+        ax.set_ylabel('Quadrature (Q)', fontsize=12)
+        
+        # Формируем заголовок
+        title_parts = [title]
+        if modulation_type:
+            title_parts.append(f"Modulation: {modulation_type}")
+        title_parts.append(f"Symbols: {n_symbols}")
+        full_title = " | ".join(title_parts)
+        ax.set_title(full_title, fontsize=14)
+        
+        # Равные масштабы осей
+        ax.set_aspect('equal')
+        
+        # Автоматическое масштабирование с отступами
+        margin = 0.1
+        x_range = np.max(np.real(symb)) - np.min(np.real(symb))
+        y_range = np.max(np.imag(symb)) - np.min(np.imag(symb))
+        x_margin = max(margin, x_range * 0.1)
+        y_margin = max(margin, y_range * 0.1)
+        ax.set_xlim(np.min(np.real(symb)) - x_margin, np.max(np.real(symb)) + x_margin)
+        ax.set_ylim(np.min(np.imag(symb)) - y_margin, np.max(np.imag(symb)) + y_margin)
+        
+        plt.tight_layout()
+        
+        # Сохраняем график
+        if filename is None:
             filename = title.replace(" ", "_") + ".png"
-            plt.savefig(filename, dpi=150, bbox_inches="tight")
-            print(f"[PLOT] Constellation saved to {filename}")
+        
+        try:
+            plt.savefig(filename, dpi=150, bbox_inches='tight')
+            print(f"[PLOT-CONSTELLATION] Saved to {filename}")
+            plt.close(fig)
+            return True
         except Exception as e:
-            print(f"[PLOT] Failed to save constellation: {e}")
-        plt.close()
+            print(f"[PLOT-CONSTELLATION] Failed to save: {e}")
+            plt.close(fig)
+            return False
+            
     except Exception as e:
-        print(f"[PLOT] Error plotting constellation: {e}")
+        print(f"[PLOT-CONSTELLATION] Error plotting constellation: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 
 def plot_signal(signal_data, fs, title="Signal", filename="signal.png"):
     """
@@ -95,6 +258,7 @@ def plot_signal(signal_data, fs, title="Signal", filename="signal.png"):
     except Exception as e:
         print(f"[PLOT] Error plotting signal: {e}")
 
+
 def plot_spectrum(freq, spectrum, title="Spectrum", filename="spectrum.png"):
     """
     Plot or save spectrum data.
@@ -128,6 +292,7 @@ def plot_spectrum(freq, spectrum, title="Spectrum", filename="spectrum.png"):
         plt.close()
     except Exception as e:
         print(f"[PLOT] Error plotting spectrum: {e}")
+
 
 def plot_rx_equalizer(Hk, subc_inds, fs, Nfft, packet_idx=0):
     """
@@ -180,6 +345,7 @@ def plot_rx_equalizer(Hk, subc_inds, fs, Nfft, packet_idx=0):
         plt.close(fig)
     except Exception as e:
         print(f"[PLOT] Error plotting equalizer: {e}")
+
 
 def plot_rx_equalizer_final(Hk_smooth_list, subc_inds, fs, Nfft):
     """
@@ -268,6 +434,7 @@ def plot_rx_equalizer_final(Hk_smooth_list, subc_inds, fs, Nfft):
     except Exception as e:
         print(f"[PLOT] Error plotting final equalizer: {e}")
 
+
 def plot_equalizer_dynamics(equalizer_history_list, subc_inds, fs, Nfft, title_prefix="Equalizer Dynamics"):
     """
     Визуализация динамики работы адаптивного эквалайзера.
@@ -275,7 +442,7 @@ def plot_equalizer_dynamics(equalizer_history_list, subc_inds, fs, Nfft, title_p
     по поднесущим во времени (по мере обработки символов).
     
     :param equalizer_history_list: Список историй эквалайзера по пакетам.
-           Каждый элемент - список массивов Hk для одного пакета.
+            Каждый элемент - список массивов Hk для одного пакета.
     :param subc_inds: Индексы поднесущих.
     :param fs: Частота дискретизации.
     :param Nfft: Размер FFT.
@@ -425,6 +592,7 @@ def plot_equalizer_dynamics(equalizer_history_list, subc_inds, fs, Nfft, title_p
             
     except Exception as e:
         print(f"[PLOT] Error plotting equalizer dynamics: {e}")
+
 
 def plot_tx_diagrams(signal, fs, title_prefix="TX"):
     """

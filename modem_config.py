@@ -148,6 +148,24 @@ AGC_DEBUG = False
 SYMBOL_TX_TARGET = SYMBOL_TARGET_RMS  # Теперь одинаковые значения
 
 # -----------------------
+# Параметры визуализации созвездия (Constellation Diagram)
+# -----------------------
+PLOT_CONSTELLATION = True  # Включить/отключить визуализацию созвездия
+CONSTELLATION_TX_FILENAME = 'constellation_tx.png'  # Имя файла для передачи
+CONSTELLATION_RX_FILENAME = 'constellation_rx.png'  # Имя файла для приема
+CONSTELLATION_USE_GRADIENT = True  # Использовать градиент цвета (синий -> красный)
+CONSTELLATION_DPI = 150  # DPI для сохранения графиков
+
+# Созвездие после OFDM-модуляции (FD символы до IFFT, до soft clipping)
+PLOT_CONSTELLATION_TX_OFDM = True  # Включить созвездие после OFDM
+CONSTELLATION_TX_OFDM_FILENAME = 'constellation_tx_ofdm.png'  # Имя файла для OFDM созвездия
+
+# Компенсация фазового сдвига в созвездии TX OFDM
+# Позволяет увидеть только влияние ACE и других обработок, без начального фазового сдвига
+CONSTELLATION_TX_OFDM_COMPENSATE_PHASE = True  # Компенсировать начальный фазовый сдвиг
+CONSTELLATION_TX_OFDM_COMPENSATED_FILENAME = 'constellation_tx_ofdm_compensated.png'  # Имя файла для компенсированного созвездия
+
+# -----------------------
 # Active Constellation Extension (ACE) – simplified implementation
 # -----------------------
 ACE_MAX_ITERS = 5
