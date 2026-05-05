@@ -1,0 +1,327 @@
+"""
+Модуль декодирования OFDM Acoustic Modem.
+Содержит функции декодирования пакетов с различными модуляциями.
+"""
+
+import numpy as np
+import zlib
+import modem_config
+from modem_config import (Nfft, Ncp, Nsub, subc_inds, fs, SYMBOL_LEN, DEFAULT_PACKET_BLOCKS,
+                           RS_CW_BITS, RS_DATA_BYTES,
+                           RS_CW_BYTES, rs, SYMBOL_TARGET_RMS, AGC_ALPHA, AGC_DEBUG, MIN_RMS,
+                           PLOTTING_AVAILABLE, _MAX_RS_FAIL_PRINTS_GLOBAL, SYNC_WINDOW_HALF)
+
+from modem_modulation import (qpsk_demap, bpsk_demap, ofdm_symbol, build_preamble, bytes_to_bits, bits_to_bytes,
+                           sync_by_corr, deinterleave_bits, AdaptiveEqualizer)
+
+from modem_packet import parse_header, build_header, make_packet_header_bytes, simulate_packet_positions
+
+# Импортируем модуль состояния
+import rx_state as _rx_st
+
+# Проверка что rx_state импортирован корректно
+assert hasattr(_rx_st, 'reset_state'), "rx_state должен содержать reset_state()"
+assert hasattr(_rx_st, '_rs_fail_prints_count'), "rx_state должен содержать _rs_fail_prints_count"
+assert hasattr(_rx_st, 'rx'), "rx_state должен содержать rx"
+assert hasattr(_rx_st, 'abs_corr'), "rx_state должен содержать abs_corr"
+assert hasattr(_rx_st, 'preamble_td'), "rx_state должен содержать preamble_td"
+assert hasattr(_rx_st, 'last_agc_rms'), "rx_state должен содержать last_agc_rms"
+assert hasattr(_rx_st, 'global_equalizer'), "rx_state должен содержать global_equalizer"
+assert hasattr(_rx_st, 'agc_history_list'), "rx_state должен содержать agc_history_list"
+assert hasattr(_rx_st, '_global_symbol_counter'), "rx_state должен содержать _global_symbol_counter"
+assert hasattr(_rx_st, 'rx_constellation_symbols'), "rx_state должен содержать rx_constellation_symbols"
+
+
+# -----------------------
+# Вспомогательная функция для декодирования с конкретной модуляцией
+# -----------------------
+def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, bytes_before_packet, expected_total, modulation):
+    """
+    Попытка декодирования пакета с конкретной модуляцией.
+    Использует отдельный экземпляр эквалайзера для каждой попытки.
+    
+    packet_blocks_expected - количество ЛОГИЧЕСКИХ блоков.
+    
+    Возвращает (decoded_bytes, rs_ok_count, used_preamble, equalizer_instance) или None при ошибке.
+    """
+    # Проверяем, что переменные состояния инициализированы
+    if _rx_st.rx is None or _rx_st.abs_corr is None:
+        return None
+    
+    # Определяем параметры для конкретной модуляции
+    if modulation == "BPSK":
+        bits_per_symbol = 1
+        ofdm_symbols_per_block = 2  # 2 физических символа = 1 логический блок для BPSK
+        bits_per_ofdm_symbol = Nsub * bits_per_symbol  # 48 для BPSK
+    else:  # QPSK
+        bits_per_symbol = 2
+        ofdm_symbols_per_block = 1  # 1 физический символ = 1 логический блок для QPSK
+        bits_per_ofdm_symbol = Nsub * bits_per_symbol  # 96 для QPSK
+    
+    try:
+        # Оценка частотной ошибки и канала (общая для всех модуляций)
+        zc_seq_ideal = (np.exp(-1j * np.pi * 1 * np.arange(Nsub) * (np.arange(Nsub) + 1) / float(Nsub)))
+        zc_seq_ideal = zc_seq_ideal / np.sqrt(np.mean(np.abs(zc_seq_ideal)**2))
+        S_zc_fd = np.zeros(Nfft, dtype=complex)
+        S_zc_fd[subc_inds] = zc_seq_ideal
+        S_zc_fd[-subc_inds] = np.conj(zc_seq_ideal)
+    except Exception:
+        S_zc_fd = None
+    
+    try:
+        rx_zc1 = _rx_st.rx[pref_abs + Ncp : pref_abs + Ncp + Nfft]
+        rx_zc2 = _rx_st.rx[pref_abs + SYMBOL_LEN + Ncp : pref_abs + SYMBOL_LEN + Ncp + Nfft]
+        cross = np.vdot(rx_zc1, rx_zc2)
+        delta_phi = np.angle(cross)
+        T_between = SYMBOL_LEN / float(fs)
+        f_err_loc = delta_phi / (2.0 * np.pi * T_between)
+        
+        pilot1_start = pref_abs + 2*SYMBOL_LEN
+        rx_pre1 = _rx_st.rx[pilot1_start + Ncp : pilot1_start + Ncp + Nfft]
+        pilot2_start = pilot1_start + SYMBOL_LEN
+        rx_pre2 = _rx_st.rx[pilot2_start + Ncp : pilot2_start + Ncp + Nfft]
+        t1_offset = (pilot1_start) / float(fs)
+        t2_offset = (pilot2_start) / float(fs)
+        time_vec = np.arange(Nfft) / float(fs)
+        rx_pre1_corr = rx_pre1 * np.exp(-1j * 2.0 * np.pi * f_err_loc * (t1_offset + time_vec))
+        rx_pre2_corr = rx_pre2 * np.exp(-1j * 2.0 * np.pi * f_err_loc * (t2_offset + time_vec))
+        R1t = np.fft.fft(rx_pre1_corr) / Nfft
+        R2t = np.fft.fft(rx_pre2_corr) / Nfft
+        
+        phi_est = 0.0
+        if S_zc_fd is not None:
+            try:
+                Rzc = np.fft.fft(rx_zc1)
+                phi_est = np.angle(np.vdot(S_zc_fd, Rzc))
+            except Exception:
+                phi_est = 0.0
+        if phi_est != 0.0:
+            R1t = R1t * np.exp(-1j * phi_est)
+            R2t = R2t * np.exp(-1j * phi_est)
+        
+        S_ref = np.fft.fft(_rx_st.preamble_td[2*SYMBOL_LEN + Ncp : 2*SYMBOL_LEN + Ncp + Nfft])
+        Hk_est = (R1t[subc_inds] / S_ref[subc_inds] + R2t[subc_inds] / S_ref[subc_inds]) / 2
+        Hk_mag = np.clip(np.median(np.abs(Hk_est)) if hasattr(np, 'median') else np.mean(np.abs(Hk_est)), 1/2.0, None)
+        Hk_s = Hk_mag * np.exp(1j*np.angle(Hk_est))
+        
+        # Создаем отдельный экземпляр эквалайзера для этой попытки
+        equalizer = AdaptiveEqualizer(initial_Hk=Hk_s, alpha=0.02, modulation=modulation)
+        print(f"[EQ] Modulation {modulation}: AdaptiveEqualizer initialized with alpha=0.02")
+        
+    except Exception as e:
+        print(f"[RX-DBG-DECODE] Exception in channel estimation for {modulation}: {e}")
+        return None
+    
+    try:
+        pre_segment = _rx_st.rx[pref_abs : pref_abs + len(_rx_st.preamble_td)]
+        pre_rms = np.sqrt(np.mean(pre_segment**2)) if pre_segment.size > 0 else MIN_RMS
+        if pre_rms < MIN_RMS:
+            pre_rms = MIN_RMS
+        packet_gain = 0.5 / pre_rms
+    except Exception:
+        packet_gain = 1.0
+    
+    # Переводим логические блоки в физические символы
+    physical_symbols_expected = packet_blocks_expected * ofdm_symbols_per_block
+    
+    pkt_data_start = pref_abs + len(_rx_st.preamble_td)
+    pkt_payload_samples = physical_symbols_expected * SYMBOL_LEN
+    seg = packet_gain * _rx_st.rx[pkt_data_start : pkt_data_start + pkt_payload_samples]
+    if len(seg) < pkt_payload_samples:
+        return None
+    frames = seg.reshape(physical_symbols_expected, SYMBOL_LEN)
+    
+    rx_syms_pkt_list = []
+    
+    for idxf, fr in enumerate(frames):
+        frame_start_abs = pkt_data_start + idxf * SYMBOL_LEN
+        t_frame_start = frame_start_abs / float(fs)
+        useful = fr[Ncp:]
+        tv = t_frame_start + np.arange(Nfft) / float(fs)
+        useful_corr = useful * np.exp(-1j * 2.0 * np.pi * f_err_loc * tv)
+        
+        cur_rms = np.sqrt(np.mean(np.abs(useful)**2)) if useful.size > 0 else 1e-12
+        est_rms = (1.0 - AGC_ALPHA) * _rx_st.last_agc_rms + AGC_ALPHA * cur_rms
+        _rx_st.last_agc_rms = est_rms
+        if est_rms < 1e-12:
+            est_rms = 1e-12
+        gain_sym = SYMBOL_TARGET_RMS / est_rms
+        
+        # Сохраняем данные AGC для последующего построения графика
+        _rx_st.agc_history_list.append({
+            'symbol_idx': _rx_st._global_symbol_counter,
+            'pkt_idx': packet_idx,
+            'frame_idx': idxf,
+            'cur_rms': cur_rms,
+            'est_rms': est_rms,
+            'gain_sym': gain_sym
+        })
+        _rx_st._global_symbol_counter += 1
+        
+        useful = useful * gain_sym
+        
+        try:
+            F = np.fft.fft(useful_corr) / Nfft
+            subc = equalizer.process(F[subc_inds])
+        except Exception:
+            subc = np.zeros(Nsub, dtype=complex)
+        
+        if modem_config.subc_phases is not None and np.any(modem_config.subc_phases != 0):
+            subc = subc * np.exp(-1j * modem_config.subc_phases)
+        
+        rx_syms_pkt_list.append(subc)
+        
+        # Сохраняем символы для градиентного созвездия
+        _rx_st.rx_constellation_symbols.extend(subc)
+        print(f"[DEBUG] Добавлено {len(subc)} символов, всего: {len(_rx_st.rx_constellation_symbols)}")
+    
+    if len(rx_syms_pkt_list) == 0:
+        return None
+    
+    try:
+        rx_syms_pkt = np.concatenate(rx_syms_pkt_list)
+    except Exception:
+        return None
+    
+    if phi_est != 0.0:
+        rx_syms_pkt = rx_syms_pkt * np.exp(-1j * phi_est)
+    
+    # Демаппинг в зависимости от модуляции
+    if modulation == "BPSK":
+        bits_pkt = bpsk_demap(rx_syms_pkt)
+    else:
+        bits_pkt = qpsk_demap(rx_syms_pkt)
+    
+    # Применяем деинтерливинг с правильным размером блока для данной модуляции
+    bits_pkt = deinterleave_bits(bits_pkt, block_size=bits_per_ofdm_symbol)
+    
+    # RS декодирование
+    cw_bits = RS_CW_BITS
+    n_cw = len(bits_pkt) // cw_bits
+    rs_ok = 0
+    decoded_blocks = []
+    
+    for ci in range(n_cw):
+        bstart = ci * cw_bits
+        bbits = bits_pkt[bstart:bstart+cw_bits]
+        if len(bbits) < cw_bits:
+            bbits = np.concatenate((bbits, np.zeros(cw_bits - len(bbits), dtype=int)))
+        bts = bits_to_bytes(bbits)
+        try:
+            msg = rs.decode(bts)[0]
+            rs_ok += 1
+            decoded_blocks.append((msg[:RS_DATA_BYTES], True))  # Успешное декодирование
+        except Exception as e:
+            msg = b'\x00' * RS_DATA_BYTES
+            decoded_blocks.append((msg, False))  # Ошибка декодирования
+    
+    # Возвращаем результат с экземпляром эквалайзера
+    return (decoded_blocks, rs_ok, pref_abs, equalizer)
+
+
+# -----------------------
+# decode_packet_at_candidate
+# -----------------------
+def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, bytes_before_packet=0, expected_total=0):
+    """Декодирование пакета по кандидату синхронизации.
+    
+    packet_blocks_expected - количество ЛОГИЧЕСКИХ блоков.
+    """
+    best_result = (b'', 0, None)
+    
+    if _rx_st.rx is None or _rx_st.abs_corr is None:
+        return best_result
+    
+    # Используем счётчик ошибок RS из rx_state (инициализируется автоматически)
+    # Сбрасываем счётчик при необходимости
+    if not hasattr(_rx_st, '_rs_fail_prints_count'):
+        _rx_st._rs_fail_prints_count = 0
+    
+    # Для первого пакета пробуем обе модуляции параллельно
+    if packet_idx == 0:
+        print(f"[RX] First packet: trying both BPSK and QPSK modulation...")
+        results = []
+        
+        for try_mod in ["QPSK", "BPSK"]:
+            print(f"[RX] Trying {try_mod} modulation...")
+            result = _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, bytes_before_packet, expected_total, try_mod)
+            if result is not None:
+                decoded_blocks, rs_ok, used_pre, eq_instance = result
+                print(f"[RX] {try_mod}: RS_OK={rs_ok}, blocks={len(decoded_blocks)}")
+                results.append((decoded_blocks, rs_ok, used_pre, eq_instance, try_mod))
+        
+        if results:
+            # Выбираем лучший результат по количеству RS_OK
+            best = max(results, key=lambda x: x[1])
+            decoded_blocks, rs_ok, used_pre, eq_instance, best_mod = best
+            
+            print(f"[RX] Best modulation: {best_mod} with RS_OK={rs_ok}")
+            
+            # Устанавливаем глобальный эквалайзер от лучшей попытки
+            _rx_st.global_equalizer = eq_instance
+            
+            # Устанавливаем глобальные настройки модуляции
+            modem_config.MODULATION = best_mod
+            if best_mod == "BPSK":
+                modem_config.BITS_PER_SYMBOL = 1
+                modem_config.OFDM_SYMBOLS_PER_BLOCK = 2
+            else:
+                modem_config.BITS_PER_SYMBOL = 2
+                modem_config.OFDM_SYMBOLS_PER_BLOCK = 1
+            modem_config.BITS_PER_OFDM_SYMBOL = modem_config.Nsub * modem_config.BITS_PER_SYMBOL
+            
+            # Формируем возвращаемый результат
+            if packet_idx == 0:
+                expected_hdr_len = 3 * 64
+                cw_per_hdr = (64 + RS_DATA_BYTES - 1) // RS_DATA_BYTES
+                if len(decoded_blocks) < cw_per_hdr * 3:
+                    for _p in range(len(decoded_blocks), cw_per_hdr * 3):
+                        decoded_blocks.append((b'\x00'*RS_DATA_BYTES, False))
+                
+                header_by_cw = bytearray(expected_hdr_len)
+                for i in range(cw_per_hdr):
+                    chosen_msg = None
+                    candidates_idx = [i, i + cw_per_hdr, i + 2 * cw_per_hdr]
+                    for ci in candidates_idx:
+                        if ci < len(decoded_blocks):
+                            msg_bytes, ok_flag = decoded_blocks[ci]
+                            if ok_flag:
+                                chosen_msg = msg_bytes[:RS_DATA_BYTES]
+                                break
+                    if chosen_msg is None:
+                        for ci in candidates_idx:
+                            if ci < len(decoded_blocks):
+                                chosen_msg = decoded_blocks[ci][0][:RS_DATA_BYTES]
+                                break
+                    if chosen_msg is None:
+                        chosen_msg = b'\x00' * RS_DATA_BYTES
+                    start_b = i * RS_DATA_BYTES
+                    header_by_cw[start_b:start_b+RS_DATA_BYTES] = chosen_msg
+                
+                single_selected_hdr = bytes(header_by_cw[:64])
+                header_by_cw = bytearray(single_selected_hdr + single_selected_hdr + single_selected_hdr)
+                ret_bytes = bytes(header_by_cw) + (b"".join([b for (b,ok) in decoded_blocks])[expected_hdr_len:])
+                _rx_st.pkt0_header_bytes = bytes(header_by_cw[:64])
+            else:
+                ret_bytes = b"".join([b for (b,ok) in decoded_blocks])
+            
+            return ret_bytes, rs_ok, used_pre
+        else:
+            print("[RX-ERR] Both BPSK and QPSK failed for first packet")
+            return best_result
+    else:
+        # Для последующих пакетов используем известную модуляцию
+        modulation = modem_config.MODULATION
+        print(f"[RX] Packet {packet_idx}: using known modulation {modulation}")
+        
+        result = _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, bytes_before_packet, expected_total, modulation)
+        if result is not None:
+            decoded_blocks, rs_ok, used_pre, eq_instance = result
+            
+            # Обновляем глобальный эквалайзер
+            _rx_st.global_equalizer = eq_instance
+            
+            ret_bytes = b"".join([b for (b,ok) in decoded_blocks])
+            return ret_bytes, rs_ok, used_pre
+        else:
+            return best_result

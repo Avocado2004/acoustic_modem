@@ -15,7 +15,8 @@ import importlib
 from modem_config import init_phases, fs, wavfile, MODULATION, Nfft, Ncp, Nsub, BITS_PER_SYMBOL
 from modem_modulation import build_preamble
 from modem_tx import transmit_text, transmit_file, _transmit_data
-from modem_rx import receive_from_file, live_receive_and_process
+from signal_processor import receive_from_file
+from rx_live import live_receive_and_process
 from channel_simulator import ChannelSimulator
 
 
