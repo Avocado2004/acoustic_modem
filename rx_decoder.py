@@ -123,6 +123,9 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
             try:
                 from equalizer_waterfall import EqualizerWaterfall
                 waterfall = EqualizerWaterfall(
+                    subc_inds=subc_inds,
+                    fs=fs,
+                    Nfft=Nfft,
                     max_symbols=500,
                     title_prefix=f"EQ Waterfall pkt={packet_idx} mod={modulation}"
                 )
@@ -402,6 +405,9 @@ def save_equalizer_waterfall(filename="rx_equalizer_waterfall.png"):
         
         # Создаём экземпляр водопада
         waterfall = EqualizerWaterfall(
+            subc_inds=subc_inds,
+            fs=fs,
+            Nfft=Nfft,
             max_symbols=500,
             title_prefix="Equalizer Waterfall"
         )

@@ -20,11 +20,17 @@ try:
     # без отображения окон (для сохранения в файл)
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+    from matplotlib.colors import Normalize
+    from matplotlib.colorbar import ColorbarBase
     PLOTTING_AVAILABLE = True
     print("[EQ-WF] matplotlib доступен (Agg бэкенд), сохранение в PNG включено")
 except ImportError:
     PLOTTING_AVAILABLE = False
     plt = None
+    cm = None
+    Normalize = None
+    ColorbarBase = None
     print("[EQ-WF] matplotlib недоступен, визуализация отключена (no-op режим)")
 
 
@@ -33,35 +39,46 @@ class EqualizerWaterfall:
     Класс для накопления и сохранения водопадной диаграммы эквалайзера.
     
     Создаёт изображение с 2 подграфиками:
-    - Верхний: амплитуда |Hk| в dB (водопад)
-    - Нижний: фаза angle(Hk) в радианах (водопад)
+    - Верхний: амплитуда |Hk| в dB (линейные графики по частоте)
+    - Нижний: фаза angle(Hk) в радианах (линейные графики по частоте)
     
-    Ось X — индексы поднесущих (0..Nsub-1).
-    Ось Y — время (номер символа/снимка).
-    Цвет — значение амплитуды/фазы.
+    Ось X — реальная частота в Гц (subc_inds * fs / Nfft).
+    Каждая линия — один снимок эквалайзера (берётся каждый step-й снимок).
+    Цвет линии — градиент от синего (старые) до красного (новые) через coolwarm.
     
     Сохранение в PNG через метод save() или автоматически при закрытии.
     """
 
-    def __init__(self, max_symbols=500, title_prefix="Equalizer Waterfall", save_on_close=False, save_filename=None):
+    def __init__(self, subc_inds, fs, Nfft, step=10, max_symbols=500,
+                 title_prefix="Equalizer Waterfall", save_on_close=False, save_filename=None):
         """
         Инициализация водопадной диаграммы.
         
+        :param subc_inds: Индексы поднесущих (массив или список).
+        :param fs: Частота дискретизации в Гц.
+        :param Nfft: Размер FFT.
+        :param step: Шаг выборки снимков для отрисовки (по умолчанию 10).
         :param max_symbols: Максимальное количество символов в истории (FIFO буфер).
         :param title_prefix: Префикс заголовка графика.
         :param save_on_close: Если True — автоматически сохраняет при закрытии.
         :param save_filename: Имя файла для автосохранения (по умолчанию 'rx_equalizer_waterfall.png').
         """
+        self.subc_inds = np.array(subc_inds, dtype=int)
+        self.fs = fs
+        self.Nfft = Nfft
+        self.step = step
         self.max_symbols = max_symbols
         self.title_prefix = title_prefix
         self.save_on_close = save_on_close
         self.save_filename = save_filename or "rx_equalizer_waterfall.png"
         self._Hk_snapshots = []  # Список снимков Hk (комплексные массивы)
-        self._fig = None
-        self._ax_amp = None
-        self._ax_phase = None
+        
+        # Вычисляем реальные частоты поднесущих в Гц
+        self._freqs = self.subc_inds * self.fs / self.Nfft
         
         print(f"[EQ-WF] EqualizerWaterfall создан: max_symbols={max_symbols}, "
+              f"step={step}, n_subcarriers={len(subc_inds)}, "
+              f"freq_range=[{self._freqs[0]:.1f}..{self._freqs[-1]:.1f}] Гц, "
               f"PLOTTING_AVAILABLE={PLOTTING_AVAILABLE}, save_on_close={save_on_close}")
 
     def update(self, Hk_snapshot):
@@ -126,8 +143,11 @@ class EqualizerWaterfall:
         Сохраняет водопадную диаграмму в PNG файл.
         
         Создаёт изображение с 2 подграфиками:
-        - Верхний: амплитуда |Hk| в dB
-        - Нижний: фаза angle(Hk) в радианах
+        - Верхний: амплитуда |Hk| в dB (линейные графики по частоте)
+        - Нижний: фаза angle(Hk) в радианах (линейные графики по частоте)
+        
+        Каждая линия — один снимок эквалайзера (берётся каждый step-й снимок).
+        Цвет линии — градиент от синего (старые) до красного (новые) через coolwarm.
         
         :param filename: Имя файла для сохранения. Если None — используется self.save_filename.
         :return: True если сохранение успешно, False в случае ошибки.
@@ -143,53 +163,80 @@ class EqualizerWaterfall:
         filename = filename or self.save_filename
         
         try:
-            # Формируем массив данных: [n_symbols, n_subcarriers]
-            Hk_matrix = np.array(self._Hk_snapshots)
-            n_symbols, n_subcarriers = Hk_matrix.shape
+            # Выбираем каждый step-й снимок для отрисовки
+            snapshots_to_plot = self._Hk_snapshots[::self.step]
+            n_snapshots = len(snapshots_to_plot)
             
-            print(f"[EQ-WF] Сохранение водопада: {n_symbols} символов x {n_subcarriers} поднесущих -> {filename}")
+            print(f"[EQ-WF] Сохранение водопада: {len(self._Hk_snapshots)} снимков, "
+                  f"отрисовывается {n_snapshots} (step={self.step}), "
+                  f"{len(self.subc_inds)} поднесущих -> {filename}")
             
-            # Амплитуда в dB: 20 * log10(|Hk|)
-            # Защищаемся от log(0)
-            amplitude = np.abs(Hk_matrix)
-            amplitude_db = 20.0 * np.log10(np.maximum(amplitude, 1e-12))
+            # Цветовая карта coolwarm: синий -> белый -> красный
+            cmap = cm.coolwarm
             
-            # Фаза в радианах
-            phase = np.angle(Hk_matrix)
+            # Нормализация для цветовой шкалы (по индексу снимка)
+            norm = Normalize(vmin=0, vmax=max(n_snapshots - 1, 1))
             
-            # Создаём фигуру с 2 подграфиками
-            fig, (ax_amp, ax_phase) = plt.subplots(2, 1, figsize=(12, 8))
+            # Создаём фигуру с 3 подграфиками: амплитуда, фаза, colorbar
+            fig, (ax_amp, ax_phase) = plt.subplots(2, 1, figsize=(14, 9))
             
-            # Верхний график (амплитуда)
-            im_amp = ax_amp.imshow(
-                amplitude_db.T,           # Транспонируем: строки = поднесущие, столбцы = время
-                aspect='auto',
-                origin='lower',
-                extent=[0, n_symbols, 0, n_subcarriers],
-                cmap='viridis',
-                interpolation='nearest'
-            )
+            # --- Верхний график: амплитуда |Hk| в dB ---
+            for i, hk in enumerate(snapshots_to_plot):
+                # Амплитуда в dB: 20 * log10(|Hk|), защита от log(0)
+                amplitude = np.abs(hk)
+                amplitude_db = 20.0 * np.log10(np.maximum(amplitude, 1e-12))
+                
+                # Цвет линии по градиенту
+                color = cmap(norm(i))
+                
+                # Подпись только для первой и последней линии (чтобы не засорять)
+                label = None
+                if i == 0:
+                    label = "First snapshot"
+                elif i == n_snapshots - 1:
+                    label = "Last snapshot"
+                
+                ax_amp.plot(self._freqs, amplitude_db, color=color, linewidth=0.8,
+                           alpha=0.8, label=label)
+            
             ax_amp.set_title(f"{self.title_prefix} - Amplitude |Hk| (dB)")
-            ax_amp.set_xlabel("Symbol Index (Time)")
-            ax_amp.set_ylabel("Subcarrier Index")
-            fig.colorbar(im_amp, ax=ax_amp, label="|Hk| (dB)")
+            ax_amp.set_xlabel("Frequency (Hz)")
+            ax_amp.set_ylabel("|Hk| (dB)")
+            ax_amp.grid(True, alpha=0.3)
+            if n_snapshots > 1:
+                ax_amp.legend(loc='upper right')
             
-            # Нижний график (фаза)
-            im_phase = ax_phase.imshow(
-                phase.T,
-                aspect='auto',
-                origin='lower',
-                extent=[0, n_symbols, 0, n_subcarriers],
-                cmap='twilight',
-                interpolation='nearest'
-            )
+            # --- Нижний график: фаза angle(Hk) в радианах ---
+            for i, hk in enumerate(snapshots_to_plot):
+                # Фаза в радианах
+                phase = np.angle(hk)
+                
+                # Цвет линии по градиенту (тот же что для амплитуды)
+                color = cmap(norm(i))
+                
+                # Подпись только для первой и последней линии
+                label = None
+                if i == 0:
+                    label = "First snapshot"
+                elif i == n_snapshots - 1:
+                    label = "Last snapshot"
+                
+                ax_phase.plot(self._freqs, phase, color=color, linewidth=0.8,
+                             alpha=0.8, label=label)
+            
             ax_phase.set_title(f"{self.title_prefix} - Phase angle(Hk) (rad)")
-            ax_phase.set_xlabel("Symbol Index (Time)")
-            ax_phase.set_ylabel("Subcarrier Index")
-            fig.colorbar(im_phase, ax=ax_phase, label="Phase (rad)")
+            ax_phase.set_xlabel("Frequency (Hz)")
+            ax_phase.set_ylabel("Phase (rad)")
+            ax_phase.grid(True, alpha=0.3)
+            if n_snapshots > 1:
+                ax_phase.legend(loc='upper right')
             
-            # Общая компоновка
-            fig.tight_layout()
+            # --- Colorbar для понимания какой цвет = какой момент времени ---
+            # Создаём ось для colorbar справа от графиков
+            fig.subplots_adjust(right=0.88, hspace=0.3)
+            cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
+            cbar = ColorbarBase(cbar_ax, cmap=cmap, norm=norm, orientation='vertical')
+            cbar.set_label('Snapshot index (time)')
             
             # Сохраняем в файл
             fig.savefig(filename, dpi=150, bbox_inches='tight')

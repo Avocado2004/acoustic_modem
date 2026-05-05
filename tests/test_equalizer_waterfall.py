@@ -2,14 +2,16 @@
 Тесты для модуля equalizer_waterfall.py — водопадной диаграммы эквалайзера.
 
 Покрывает:
-- Создание экземпляра EqualizerWaterfall
+- Создание экземпляра EqualizerWaterfall (с новыми параметрами subc_inds, fs, Nfft, step)
 - Добавление снимков Hk через update()
 - Загрузку истории через update_from_history()
 - Ограничение буфера (FIFO)
 - Методы clear(), get_snapshot_count(), get_snapshots()
-- Сохранение в PNG файл через save()
+- Сохранение в PNG файл через save() (линейные графики с градиентом)
 - Автосохранение при закрытии (save_on_close)
 - Режим no-op при недоступном matplotlib
+- Вычисление частот поднесущих
+- Шаг выборки снимков (step)
 
 Все комментарии — на русском языке.
 """
@@ -24,6 +26,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # =============================================================================
+# Вспомогательные функции для тестов
+# =============================================================================
+
+def _default_subc_inds(n=48):
+    """Возвращает стандартные индексы поднесущих для тестов."""
+    return list(range(1, n + 1))
+
+
+def _default_fs():
+    """Возвращает стандартную частоту дискретизации для тестов."""
+    return 48000
+
+
+def _default_Nfft():
+    """Возвращает стандартный размер FFT для тестов."""
+    return 256
+
+
+# =============================================================================
 # Тесты без matplotlib (mock)
 # =============================================================================
 
@@ -32,25 +53,26 @@ class TestEqualizerWaterfallNoMatplotlib:
 
     def test_import_without_matplotlib(self):
         """Проверка что модуль импортируется даже без matplotlib."""
-        # Модуль должен импортироваться без ошибок
         from equalizer_waterfall import EqualizerWaterfall, PLOTTING_AVAILABLE
         assert EqualizerWaterfall is not None
 
     def test_create_instance_without_matplotlib(self):
         """Проверка создания экземпляра без matplotlib."""
-        # Мокаем matplotlib как недоступный
         import equalizer_waterfall as ew
         original_plt = ew.plt
         ew.PLOTTING_AVAILABLE = False
         ew.plt = None
         
         try:
-            wf = ew.EqualizerWaterfall(max_symbols=100)
+            wf = ew.EqualizerWaterfall(
+                subc_inds=_default_subc_inds(),
+                fs=_default_fs(),
+                Nfft=_default_Nfft()
+            )
             assert wf is not None
             assert wf.get_snapshot_count() == 0
         finally:
             ew.plt = original_plt
-            # Восстанавливаем оригинальное значение
             try:
                 import matplotlib
                 ew.PLOTTING_AVAILABLE = True
@@ -67,9 +89,13 @@ class TestEqualizerWaterfallNoMatplotlib:
         ew.plt = None
         
         try:
-            wf = ew.EqualizerWaterfall(max_symbols=100)
+            wf = ew.EqualizerWaterfall(
+                subc_inds=_default_subc_inds(),
+                fs=_default_fs(),
+                Nfft=_default_Nfft()
+            )
             Hk = np.ones(48, dtype=complex)
-            wf.update(Hk)  # Не должно вызвать ошибку
+            wf.update(Hk)
             assert wf.get_snapshot_count() == 1
         finally:
             ew.plt = original_plt
@@ -89,9 +115,13 @@ class TestEqualizerWaterfallNoMatplotlib:
         ew.plt = None
         
         try:
-            wf = ew.EqualizerWaterfall(max_symbols=100)
-            wf.update(None)  # Не должно вызвать ошибку
-            assert wf.get_snapshot_count() == 0  # None не добавляется
+            wf = ew.EqualizerWaterfall(
+                subc_inds=_default_subc_inds(),
+                fs=_default_fs(),
+                Nfft=_default_Nfft()
+            )
+            wf.update(None)
+            assert wf.get_snapshot_count() == 0
         finally:
             ew.plt = original_plt
             try:
@@ -110,11 +140,14 @@ class TestEqualizerWaterfallNoMatplotlib:
         ew.plt = None
         
         try:
-            wf = ew.EqualizerWaterfall(max_symbols=100)
+            wf = ew.EqualizerWaterfall(
+                subc_inds=_default_subc_inds(),
+                fs=_default_fs(),
+                Nfft=_default_Nfft()
+            )
             Hk = np.ones(48, dtype=complex)
             wf.update(Hk)
             
-            # save() должен вернуть False без matplotlib
             result = wf.save("test_waterfall.png")
             assert result == False
         finally:
@@ -142,9 +175,16 @@ class TestEqualizerWaterfallFunctionality:
         ew.PLOTTING_AVAILABLE = False
         ew.plt = None
         
-        wf = ew.EqualizerWaterfall(max_symbols=max_symbols, **kwargs)
+        # Параметры по умолчанию
+        defaults = dict(
+            subc_inds=_default_subc_inds(),
+            fs=_default_fs(),
+            Nfft=_default_Nfft(),
+        )
+        defaults.update(kwargs)
         
-        # Восстанавливаем для последующих тестов
+        wf = ew.EqualizerWaterfall(max_symbols=max_symbols, **defaults)
+        
         ew.plt = original_plt
         try:
             import matplotlib
@@ -179,6 +219,8 @@ class TestEqualizerWaterfallFunctionality:
         """Проверка что данные сохраняются корректно."""
         wf = self._create_waterfall()
         Hk = np.array([1 + 2j, 3 + 4j, 5 + 6j], dtype=complex)
+        # Создаём waterfall с правильным количеством поднесущих
+        wf = self._create_waterfall(subc_inds=_default_subc_inds(3))
         wf.update(Hk)
         
         snapshots = wf.get_snapshots()
@@ -192,9 +234,8 @@ class TestEqualizerWaterfallFunctionality:
         wf.update(Hk)
         
         snapshots = wf.get_snapshots()
-        snapshots[0][0] = 999 + 999j  # Модифицируем копию
+        snapshots[0][0] = 999 + 999j
         
-        # Оригинал в буфере не должен измениться
         assert wf.get_snapshots()[0][0] == 1 + 0j
 
     def test_fifo_buffer_limit(self):
@@ -206,13 +247,10 @@ class TestEqualizerWaterfallFunctionality:
             Hk = np.ones(48, dtype=complex) * i
             wf.update(Hk)
         
-        # Должны остаться только последние max_symbols снимков
         assert wf.get_snapshot_count() == max_symbols
         
         snapshots = wf.get_snapshots()
-        # Первый снимок должен иметь значение 10 (0-9 отброшены)
         assert snapshots[0][0] == 10 + 0j
-        # Последний — 19
         assert snapshots[-1][0] == 19 + 0j
 
     def test_clear(self):
@@ -241,10 +279,9 @@ class TestEqualizerWaterfallFunctionality:
         """Проверка update_from_history с вложенным списком (по пакетам)."""
         wf = self._create_waterfall()
         
-        # Формат: список пакетов, каждый пакет — список снимков
         history = [
-            [np.ones(48, dtype=complex) * i for i in range(3)],  # Пакет 0
-            [np.ones(48, dtype=complex) * i for i in range(3, 7)],  # Пакет 1
+            [np.ones(48, dtype=complex) * i for i in range(3)],
+            [np.ones(48, dtype=complex) * i for i in range(3, 7)],
         ]
         wf.update_from_history(history)
         
@@ -260,13 +297,11 @@ class TestEqualizerWaterfallFunctionality:
         """Проверка update_from_history с None в истории."""
         wf = self._create_waterfall()
         history = [
-            [np.ones(48, dtype=complex)],  # Пакет 0
-            None,  # Пакет 1 — None
-            [np.ones(48, dtype=complex) * 2],  # Пакет 2
+            [np.ones(48, dtype=complex)],
+            None,
+            [np.ones(48, dtype=complex) * 2],
         ]
-        # Не должно вызвать ошибку
         wf.update_from_history(history)
-        # Должны быть добавлены только валидные пакеты
         assert wf.get_snapshot_count() == 2
 
     def test_update_from_history_with_max_symbols(self):
@@ -279,14 +314,12 @@ class TestEqualizerWaterfallFunctionality:
         ]
         wf.update_from_history(history)
         
-        # Должны остаться только последние max_symbols
         assert wf.get_snapshot_count() == max_symbols
 
     def test_complex_Hk_values(self):
         """Проверка работы с комплексными значениями Hk."""
         wf = self._create_waterfall()
         
-        # Создаём Hk с разными амплитудами и фазами
         Hk = np.exp(1j * np.linspace(0, 2 * np.pi, 48))
         wf.update(Hk)
         
@@ -296,18 +329,17 @@ class TestEqualizerWaterfallFunctionality:
 
     def test_different_subcarrier_counts(self):
         """Проверка работы с разным количеством поднесущих."""
-        wf = self._create_waterfall()
-        
         for n_sub in [1, 12, 48, 96]:
+            subc = _default_subc_inds(n_sub)
+            wf = self._create_waterfall(subc_inds=subc, fs=_default_fs(), Nfft=_default_Nfft())
             Hk = np.ones(n_sub, dtype=complex)
             wf.update(Hk)
-        
-        assert wf.get_snapshot_count() == 4
+            assert wf.get_snapshot_count() == 1
 
     def test_close_without_error(self):
         """Проверка что close() не вызывает ошибку."""
         wf = self._create_waterfall()
-        wf.close()  # Не должно вызвать ошибку
+        wf.close()
 
     def test_update_after_close(self):
         """Проверка что update() работает после close()."""
@@ -340,42 +372,135 @@ class TestEqualizerWaterfallFunctionality:
 
 
 # =============================================================================
+# Тесты новых параметров (subc_inds, fs, Nfft, step)
+# =============================================================================
+
+class TestEqualizerWaterfallNewParams:
+    """Тесты новых параметров конструктора."""
+
+    def _create_waterfall(self, **kwargs):
+        """Вспомогательный метод для создания waterfall."""
+        import equalizer_waterfall as ew
+        defaults = dict(
+            subc_inds=_default_subc_inds(),
+            fs=_default_fs(),
+            Nfft=_default_Nfft(),
+        )
+        defaults.update(kwargs)
+        return ew.EqualizerWaterfall(**defaults)
+
+    def test_freqs_computed_correctly(self):
+        """Проверка вычисления частот поднесущих: freqs = subc_inds * fs / Nfft."""
+        subc_inds = [10, 20, 30]
+        fs = 48000
+        Nfft = 256
+        wf = self._create_waterfall(subc_inds=subc_inds, fs=fs, Nfft=Nfft)
+        
+        expected_freqs = np.array(subc_inds) * fs / Nfft
+        np.testing.assert_array_almost_equal(wf._freqs, expected_freqs)
+
+    def test_freqs_with_different_fs(self):
+        """Проверка вычисления частот с другой частотой дискретизации."""
+        subc_inds = [1, 2, 3]
+        fs = 44100
+        Nfft = 512
+        wf = self._create_waterfall(subc_inds=subc_inds, fs=fs, Nfft=Nfft)
+        
+        expected_freqs = np.array(subc_inds) * fs / Nfft
+        np.testing.assert_array_almost_equal(wf._freqs, expected_freqs)
+
+    def test_step_default(self):
+        """Проверка значения step по умолчанию."""
+        wf = self._create_waterfall()
+        assert wf.step == 10
+
+    def test_step_custom(self):
+        """Проверка установки пользовательского step."""
+        wf = self._create_waterfall(step=5)
+        assert wf.step == 5
+
+    def test_step_one(self):
+        """Проверка step=1 — все снимки отрисовываются."""
+        wf = self._create_waterfall(step=1)
+        assert wf.step == 1
+
+    def test_subc_inds_stored(self):
+        """Проверка сохранения индексов поднесущих."""
+        subc_inds = [5, 10, 15, 20]
+        wf = self._create_waterfall(subc_inds=subc_inds)
+        np.testing.assert_array_equal(wf.subc_inds, subc_inds)
+
+    def test_fs_stored(self):
+        """Проверка сохранения частоты дискретизации."""
+        wf = self._create_waterfall(fs=96000)
+        assert wf.fs == 96000
+
+    def test_Nfft_stored(self):
+        """Проверка сохранения размера FFT."""
+        wf = self._create_waterfall(Nfft=1024)
+        assert wf.Nfft == 1024
+
+    def test_freqs_length_matches_subc_inds(self):
+        """Проверка что длина массива частот совпадает с количеством поднесущих."""
+        subc_inds = list(range(1, 97))  # 96 поднесущих
+        wf = self._create_waterfall(subc_inds=subc_inds)
+        assert len(wf._freqs) == len(subc_inds)
+
+    def test_freqs_are_in_hz(self):
+        """Проверка что частоты действительно в Гц (положительные, разумные значения)."""
+        subc_inds = list(range(1, 49))
+        fs = 48000
+        Nfft = 256
+        wf = self._create_waterfall(subc_inds=subc_inds, fs=fs, Nfft=Nfft)
+        
+        # Все частоты должны быть положительными
+        assert np.all(wf._freqs > 0)
+        # Максимальная частота должна быть меньше fs/2 (Найквист)
+        assert wf._freqs[-1] < fs / 2
+
+
+# =============================================================================
 # Тесты сохранения в файл (требует matplotlib)
 # =============================================================================
 
 class TestEqualizerWaterfallSave:
     """Тесты сохранения водопадной диаграммы в PNG файл."""
 
+    def _create_waterfall(self, **kwargs):
+        """Вспомогательный метод для создания waterfall с реальным matplotlib."""
+        from equalizer_waterfall import EqualizerWaterfall
+        defaults = dict(
+            subc_inds=_default_subc_inds(),
+            fs=_default_fs(),
+            Nfft=_default_Nfft(),
+        )
+        defaults.update(kwargs)
+        return EqualizerWaterfall(**defaults)
+
     def test_save_creates_file(self):
         """Проверка что save() создаёт PNG файл."""
         import equalizer_waterfall as ew
         
-        # Пропускаем тест если matplotlib недоступен
         if not ew.PLOTTING_AVAILABLE:
             pytest.skip("matplotlib недоступен")
         
         test_filename = "test_waterfall_save.png"
         
         try:
-            wf = ew.EqualizerWaterfall(max_symbols=100)
+            wf = self._create_waterfall()
             
-            # Добавляем несколько снимков
-            for i in range(5):
+            # Добавляем несколько снимков (больше step чтобы проверить выборку)
+            for i in range(25):
                 Hk = np.exp(1j * np.linspace(0, 2 * np.pi, 48)) * (1 + 0.1 * i)
                 wf.update(Hk)
             
-            # Сохраняем
             result = wf.save(test_filename)
             
-            # Проверяем результат
             assert result == True
             assert os.path.exists(test_filename)
-            
-            # Проверяем что файл не пустой
             assert os.path.getsize(test_filename) > 0
             
         finally:
-            # Очищаем тестовый файл
             if os.path.exists(test_filename):
                 os.remove(test_filename)
 
@@ -389,12 +514,9 @@ class TestEqualizerWaterfallSave:
         test_filename = "test_waterfall_empty.png"
         
         try:
-            wf = ew.EqualizerWaterfall(max_symbols=100)
-            
-            # Сохраняем без добавления снимков
+            wf = self._create_waterfall()
             result = wf.save(test_filename)
             
-            # Должен вернуть False
             assert result == False
             assert not os.path.exists(test_filename)
             
@@ -412,14 +534,12 @@ class TestEqualizerWaterfallSave:
         test_filename = "test_custom_filename.png"
         
         try:
-            wf = ew.EqualizerWaterfall(max_symbols=100)
+            wf = self._create_waterfall()
             
-            # Добавляем снимки
-            for i in range(3):
+            for i in range(15):
                 Hk = np.ones(48, dtype=complex) * (i + 1)
                 wf.update(Hk)
             
-            # Сохраняем с пользовательским именем
             result = wf.save(test_filename)
             
             assert result == True
@@ -439,17 +559,66 @@ class TestEqualizerWaterfallSave:
         test_filename = "test_save_on_close.png"
         
         try:
-            wf = ew.EqualizerWaterfall(max_symbols=100, save_on_close=True, save_filename=test_filename)
+            wf = self._create_waterfall(save_on_close=True, save_filename=test_filename)
             
-            # Добавляем снимки
-            for i in range(3):
+            for i in range(15):
                 Hk = np.ones(48, dtype=complex) * (i + 1)
                 wf.update(Hk)
             
-            # Закрываем — должно автоматически сохранить
             wf.close()
             
-            # Проверяем что файл создан
+            assert os.path.exists(test_filename)
+            
+        finally:
+            if os.path.exists(test_filename):
+                os.remove(test_filename)
+
+    def test_save_with_step_filters_snapshots(self):
+        """Проверка что step фильтрует снимки при отрисовке."""
+        import equalizer_waterfall as ew
+        
+        if not ew.PLOTTING_AVAILABLE:
+            pytest.skip("matplotlib недоступен")
+        
+        test_filename = "test_waterfall_step.png"
+        
+        try:
+            # Создаём waterfall с step=5
+            wf = self._create_waterfall(step=5)
+            
+            # Добавляем 20 снимков
+            for i in range(20):
+                Hk = np.ones(48, dtype=complex) * (i + 1)
+                wf.update(Hk)
+            
+            # Должно отрисоваться 20/5 = 4 линии
+            result = wf.save(test_filename)
+            
+            assert result == True
+            assert os.path.exists(test_filename)
+            assert os.path.getsize(test_filename) > 0
+            
+        finally:
+            if os.path.exists(test_filename):
+                os.remove(test_filename)
+
+    def test_save_single_snapshot(self):
+        """Проверка сохранения с одним снимком (без легенды)."""
+        import equalizer_waterfall as ew
+        
+        if not ew.PLOTTING_AVAILABLE:
+            pytest.skip("matplotlib недоступен")
+        
+        test_filename = "test_waterfall_single.png"
+        
+        try:
+            wf = self._create_waterfall()
+            Hk = np.ones(48, dtype=complex)
+            wf.update(Hk)
+            
+            result = wf.save(test_filename)
+            
+            assert result == True
             assert os.path.exists(test_filename)
             
         finally:
@@ -473,7 +642,6 @@ class TestRxDecoderWaterfallIntegration:
         params = list(sig.parameters.keys())
         
         assert 'show_waterfall' in params
-        # Проверяем значение по умолчанию
         assert sig.parameters['show_waterfall'].default == False
 
     def test_try_decode_with_modulation_signature(self):
@@ -485,7 +653,6 @@ class TestRxDecoderWaterfallIntegration:
         params = list(sig.parameters.keys())
         
         assert 'show_waterfall' in params
-        # Проверяем значение по умолчанию
         assert sig.parameters['show_waterfall'].default == False
 
     def test_save_equalizer_waterfall_exists(self):
@@ -508,7 +675,14 @@ class TestEqualizerWaterfallEdgeCases:
         ew.PLOTTING_AVAILABLE = False
         ew.plt = None
         
-        wf = ew.EqualizerWaterfall(max_symbols=max_symbols, **kwargs)
+        defaults = dict(
+            subc_inds=_default_subc_inds(),
+            fs=_default_fs(),
+            Nfft=_default_Nfft(),
+        )
+        defaults.update(kwargs)
+        
+        wf = ew.EqualizerWaterfall(max_symbols=max_symbols, **defaults)
         
         ew.plt = original_plt
         try:
