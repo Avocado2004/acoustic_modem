@@ -492,6 +492,10 @@ class AdaptiveEqualizer:
     Класс для адаптивного выравнивания частотной характеристики канала.
     Использует подход Decision-Directed (DD) для уточнения оценки канала Hk
     по мере поступления символов данных.
+    
+    Особенность: после каждого обновления Hk нормализуется для сохранения
+    среднего гейна постоянным. Это предотвращает деградацию сигнала в
+    идеальных каналах (loopback) и обеспечивает стабильную работу AGC.
     """
     
     def __init__(self, initial_Hk, alpha=0.05, modulation='QPSK', store_history=True, history_step=1):
@@ -512,10 +516,32 @@ class AdaptiveEqualizer:
         self.history_step = history_step
         self.history = []  # Список для хранения истории Hk
         
+        # Сохраняем начальную среднюю амплитуду Hk для нормализации
+        # Это позволяет эквалайзеру выравнивать частоты, но не менять общий гейн
+        self._initial_avg_mag = np.mean(np.abs(self.Hk))
+        
         # Сохраняем начальное состояние
         if self.store_history:
             self.history.append(self.Hk.copy())
+    
+    def _normalize_Hk(self):
+        """
+        Нормализация Hk для сохранения среднего гейна постоянным.
         
+        Вычисляет текущую среднюю амплитуду Hk и масштабирует все значения
+        так, чтобы средняя амплитуда оставалась равной начальной.
+        
+        Это позволяет эквалайзеру:
+        - Выравнивать фазовые искажения (важно для когерентного приёма)
+        - Компенсировать частотно-зависимые амплитудные искажения канала
+        - НЕ менять общий уровень сигнала (гейн остаётся стабильным)
+        """
+        current_avg_mag = np.mean(np.abs(self.Hk))
+        if current_avg_mag > 1e-12:  # Защита от деления на ноль
+            # Масштабируем Hk так, чтобы средняя амплитуда оставалась постоянной
+            scale_factor = self._initial_avg_mag / current_avg_mag
+            self.Hk = self.Hk * scale_factor
+    
     def process(self, rx_fd):
         """
         Обработка одного принятого OFDM символа (в частотной области).
@@ -549,6 +575,11 @@ class AdaptiveEqualizer:
             if len(Hk_new) > 0:
                 # Обновляем только те поднесущие, где есть надежное решение
                 self.Hk[mask] = (1.0 - self.alpha) * self.Hk[mask] + self.alpha * Hk_new
+                
+                # 5. Нормализация Hk для сохранения среднего гейна
+                # Это ключевое изменение: эквалайзер выравнивает частоты,
+                # но не меняет общий уровень сигнала
+                self._normalize_Hk()
         
         self.symbol_count += 1
         
@@ -556,7 +587,9 @@ class AdaptiveEqualizer:
         if self.store_history and (self.symbol_count % self.history_step == 0 or self.symbol_count == 1):
             self.history.append(self.Hk.copy())
             if self.symbol_count % 100 == 0:
-                print(f"[EQ-DEBUG] Сохранено {len(self.history)} состояний Hk (символ {self.symbol_count})")
+                avg_mag = np.mean(np.abs(self.Hk))
+                print(f"[EQ-DEBUG] Сохранено {len(self.history)} состояний Hk (символ {self.symbol_count}), "
+                      f"|Hk|_avg={avg_mag:.4f}")
         
         return x_hat
     
