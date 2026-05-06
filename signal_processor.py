@@ -1160,12 +1160,16 @@ def _plot_results():
         #     print("[SP-PLOT] Построение итогового графика эквалайзера...")
         #     plot_rx_equalizer_final(_rx_st.Hk_smooth_list, subc_inds, fs, Nfft)
 
-        # === Отключено: График AGC по символам ===
-        # if _rx_st.agc_history_list and len(_rx_st.agc_history_list) > 0:
-        #     print("[SP-PLOT] Построение графика AGC...")
-        #     plot_agc_per_symbol(_rx_st.agc_history_list, title="AGC per Symbol")
-        #     _rx_st.agc_history_list.clear()
-        #     _rx_st._global_symbol_counter = 0
+        # === График AGC по символам ===
+        if _rx_st.agc_history_list and len(_rx_st.agc_history_list) > 0:
+            print("[SP-PLOT] Построение графика AGC...")
+            try:
+                from plot_utils import plot_agc_per_symbol
+                plot_agc_per_symbol(_rx_st.agc_history_list, title="AGC per Symbol")
+            except Exception as e:
+                print(f"[SP-PLOT] Ошибка построения графика AGC: {e}")
+            _rx_st.agc_history_list.clear()
+            _rx_st._global_symbol_counter = 0
 
     except Exception as e:
         print(f"[SP-PLOT] Ошибка при построении графиков: {e}")

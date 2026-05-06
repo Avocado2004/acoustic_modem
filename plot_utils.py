@@ -80,7 +80,7 @@ def compensate_phase(symbols, phases):
     return compensated
 
 
-def plot_constellation(symb, title="Constellation", filename=None, use_gradient=False, modulation_type="", phase_compensation=None, max_points=5000):
+def plot_constellation(symb, title="Constellation", filename=None, use_gradient=False, modulation_type="", phase_compensation=None, max_points=5000, save_csv=True):
     """
     Отрисовка созвездия (constellation diagram) с опциональным градиентом цвета.
     
@@ -103,6 +103,9 @@ def plot_constellation(symb, title="Constellation", filename=None, use_gradient=
         Максимальное количество точек для отрисовки (по умолчанию 5000).
         Если символов больше, они будут равномерно прорежены.
         Это ускоряет построение графика на больших данных.
+    save_csv : bool, optional
+        Если True (по умолчанию) — сохраняет данные созвездия в CSV файл.
+        Отключите для ускорения работы при большом количестве символов.
     
     Возвращает
     -------
@@ -122,6 +125,9 @@ def plot_constellation(symb, title="Constellation", filename=None, use_gradient=
     
     # С ограничением количества точек:
     plot_constellation(symbols, "RX Constellation", max_points=2000)
+    
+    # Без сохранения CSV (быстрее на больших данных):
+    plot_constellation(symbols, "RX Constellation", save_csv=False)
     """
     if not PLOTTING_AVAILABLE or plt is None:
         # На мобильных платформах или при отсутствии matplotlib сохраняем данные в CSV
@@ -224,6 +230,16 @@ def plot_constellation(symb, title="Constellation", filename=None, use_gradient=
         try:
             plt.savefig(filename, dpi=150, bbox_inches='tight')
             print(f"[PLOT-CONSTELLATION] Saved to {filename}")
+            
+            # Сохраняем данные в CSV если включено
+            if save_csv:
+                try:
+                    csv_data = np.column_stack((np.real(symb), np.imag(symb)))
+                    csv_filename = filename.replace(".png", "_data.csv")
+                    np.savetxt(csv_filename, csv_data, delimiter=",", header="I,Q", comments="")
+                    print(f"[PLOT-CONSTELLATION] Data saved to {csv_filename}")
+                except Exception as csv_e:
+                    print(f"[PLOT-CONSTELLATION] Failed to save CSV: {csv_e}")
             
             plt.close(fig)
             return True

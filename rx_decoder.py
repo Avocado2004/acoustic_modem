@@ -174,6 +174,8 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         if est_rms < 1e-12:
             est_rms = 1e-12
         gain_sym = SYMBOL_TARGET_RMS / est_rms
+        # Ограничиваем gain_sym, чтобы избежать перегрузки или слишком слабого сигнала
+        gain_sym = np.clip(gain_sym, 0.1, 10.0)
         
         # Сохраняем данные AGC для последующего построения графика
         _rx_st.agc_history_list.append({
