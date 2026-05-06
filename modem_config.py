@@ -128,6 +128,11 @@ DEFAULT_PACKET_BLOCKS = 75  # default logical OFDM blocks per packet
 GAP_OFDM_SYMBOLS = 0
 SYMBOL_LEN = Nfft + Ncp
 GAP_SAMPLES_DEFAULT = GAP_OFDM_SYMBOLS * SYMBOL_LEN
+
+# Количество warmup-символов (OFDM символов с шумом) перед преамбулой
+# Эти символы позволяют AGC и эквалайзеру настроиться до прихода преамбулы
+WARMUP_SYMBOLS = 10  # количество OFDM символов с шумом перед преамбулой
+WARMUP_LEVEL = 0.3   # уровень шума для warmup-символов (относительно SYMBOL_TX_TARGET)
 # ширина окна поиска кандидата (в отсчетах) — полуширина окна вокруг pref_abs
 SYNC_WINDOW_HALF = 20  # можно изменить (типично Ncp или SYMBOL_LEN//2)
 
