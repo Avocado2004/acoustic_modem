@@ -108,14 +108,19 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
             R1t = R1t * np.exp(-1j * phi_est)
             R2t = R2t * np.exp(-1j * phi_est)
         
-        S_ref = np.fft.fft(_rx_st.preamble_td[2*SYMBOL_LEN + Ncp : 2*SYMBOL_LEN + Ncp + Nfft])
+        S_ref = np.fft.fft(_rx_st.preamble_td[2*SYMBOL_LEN + Ncp : 2*SYMBOL_LEN + Ncp + Nfft]) / Nfft
         Hk_est = (R1t[subc_inds] / S_ref[subc_inds] + R2t[subc_inds] / S_ref[subc_inds]) / 2
-        Hk_mag = np.clip(np.median(np.abs(Hk_est)) if hasattr(np, 'median') else np.mean(np.abs(Hk_est)), 1/2.0, None)
+        Hk_mag_raw = np.median(np.abs(Hk_est)) if hasattr(np, 'median') else np.mean(np.abs(Hk_est))
+        Hk_mag = np.clip(Hk_mag_raw, 1/2.0, None)
         Hk_s = Hk_mag * np.exp(1j*np.angle(Hk_est))
+        
+        # Отладочный вывод начального состояния эквалайзера
+        print(f"[EQ-INIT] Hk_est: median_abs={Hk_mag_raw:.4f}, clipped={Hk_mag:.4f}, mean_phase={np.mean(np.angle(Hk_est)):.4f} rad")
+        print(f"[EQ-INIT] R1t[subc] rms={np.sqrt(np.mean(np.abs(R1t[subc_inds])**2)):.6f}, S_ref[subc] rms={np.sqrt(np.mean(np.abs(S_ref[subc_inds])**2)):.6f}")
         
         # Создаем отдельный экземпляр эквалайзера для этой попытки
         equalizer = AdaptiveEqualizer(initial_Hk=Hk_s, alpha=0.02, modulation=modulation)
-        print(f"[EQ] Modulation {modulation}: AdaptiveEqualizer initialized with alpha=0.02")
+        print(f"[EQ] Modulation {modulation}: AdaptiveEqualizer initialized with alpha=0.02, initial_avg_mag={np.mean(np.abs(Hk_s)):.4f}")
         
         # Создаём визуализацию водопадной диаграммы (если запрошена)
         waterfall = None
@@ -177,6 +182,10 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         # Ограничиваем gain_sym, чтобы избежать перегрузки или слишком слабого сигнала
         gain_sym = np.clip(gain_sym, 0.1, 10.0)
         
+        # Отладочный вывод AGC
+        if AGC_DEBUG:
+            print(f"[AGC] pkt={packet_idx} frame={idxf} cur_rms={cur_rms:.6f} est_rms={est_rms:.6f} gain_sym={gain_sym:.3f}")
+        
         # Сохраняем данные AGC для последующего построения графика
         _rx_st.agc_history_list.append({
             'symbol_idx': _rx_st._global_symbol_counter,
@@ -189,10 +198,15 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         _rx_st._global_symbol_counter += 1
         
         useful = useful * gain_sym
+        # Применяем AGC-усиление к сигналу с компенсацией частотного сдвига
+        useful_corr = useful * np.exp(-1j * 2.0 * np.pi * f_err_loc * tv)
         
         try:
             F = np.fft.fft(useful_corr) / Nfft
             subc = equalizer.process(F[subc_inds])
+            # Отладочный вывод амплитуды после эквалайзера
+            if AGC_DEBUG and idxf < 3:
+                print(f"[EQ-OUT] pkt={packet_idx} frame={idxf} subc_rms={np.sqrt(np.mean(np.abs(subc)**2)):.6f} subc_max={np.max(np.abs(subc)):.6f}")
         except Exception:
             subc = np.zeros(Nsub, dtype=complex)
 
@@ -213,6 +227,10 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         
         if modem_config.subc_phases is not None and np.any(modem_config.subc_phases != 0):
             subc = subc * np.exp(-1j * modem_config.subc_phases)
+        
+        # Отладочный вывод амплитуды перед сохранением
+        if AGC_DEBUG and idxf < 3:
+            print(f"[POST-PHASE] pkt={packet_idx} frame={idxf} subc_rms={np.sqrt(np.mean(np.abs(subc)**2)):.6f}")
         
         rx_syms_pkt_list.append(subc)
         
