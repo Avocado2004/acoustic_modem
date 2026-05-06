@@ -35,7 +35,7 @@ def scale_param(min_val, max_val, percent):
     return min_val + (max_val - min_val) * (percent / 100.0)
 
 
-def print_distortion_params(percent, fs, data_size_bytes=300):
+def print_distortion_params(percent, fs, data_size_bytes=1024):
     """
     Выводит в консоль все параметры искажений и конфигурации, которые будут применены.
     
@@ -344,8 +344,8 @@ def run_loop():
     print(f"[LOOP] Установлен процент искажений: {percent}%")
     
     # Выводим параметры искажений, которые будут применены
-    # Сначала генерируем данные, чтобы знать их размер
-    random_text = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(300))
+    # Сначала генерируем данные, чтобы знать их размер (1 КБ = 1024 байта)
+    random_text = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(1024))
     original_data = random_text.encode('utf-8')
     print(f"[LOOP] Сгенерирован текст: {random_text[:20]}...")
     print(f"[LOOP] Размер данных: {len(original_data)} байт")
@@ -356,9 +356,9 @@ def run_loop():
     # 2. Передаем текст
     print(f"\n[LOOP] Передача текста...")
     # Сохраняем текст во временный файл для проверки
-    temp_original = "loop_original_text.bin"
-    with open(temp_original, "wb") as f:
-        f.write(original_data)
+    temp_original = "loop_original_text.txt"
+    with open(temp_original, "w", encoding='utf-8') as f:
+        f.write(random_text)
     print(f"[LOOP] Оригинальные данные сохранены в {temp_original}")
     
     # Передаем текст (используем transmit_text, который сохраняет в WAV)

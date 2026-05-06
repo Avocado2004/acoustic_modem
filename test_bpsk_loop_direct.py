@@ -23,16 +23,16 @@ from modem_modulation import build_preamble
 from modem_tx import transmit_text
 from signal_processor import receive_from_file
 
-# Генерируем случайный текст
-random_text = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(300))
+# Генерируем случайный текст (1 КБ = 1024 байта)
+random_text = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(1024))
 original_data = random_text.encode('utf-8')
 print(f"[TEST] Сгенерирован текст: {random_text[:20]}...")
 print(f"[TEST] Размер данных: {len(original_data)} байт")
 
 # Сохраняем оригинал
-temp_original = "loop_original_text.bin"
-with open(temp_original, "wb") as f:
-    f.write(original_data)
+temp_original = "loop_original_text.txt"
+with open(temp_original, "w", encoding='utf-8') as f:
+    f.write(random_text)
 
 # Передаём текст
 print(f"\n[TEST] Передача текста...")

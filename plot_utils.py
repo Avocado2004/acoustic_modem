@@ -80,7 +80,7 @@ def compensate_phase(symbols, phases):
     return compensated
 
 
-def plot_constellation(symb, title="Constellation", filename=None, use_gradient=False, modulation_type="", phase_compensation=None):
+def plot_constellation(symb, title="Constellation", filename=None, use_gradient=False, modulation_type="", phase_compensation=None, max_points=5000):
     """
     Отрисовка созвездия (constellation diagram) с опциональным градиентом цвета.
     
@@ -99,6 +99,10 @@ def plot_constellation(symb, title="Constellation", filename=None, use_gradient=
     phase_compensation : array-like, optional
         Массив фаз для компенсации фазового сдвига. Если None - компенсация не применяется.
         Используется для визуализации созвездия без начального фазового сдвига (Schroeder/Habr).
+    max_points : int, optional
+        Максимальное количество точек для отрисовки (по умолчанию 5000).
+        Если символов больше, они будут равномерно прорежены.
+        Это ускоряет построение графика на больших данных.
     
     Возвращает
     -------
@@ -115,6 +119,9 @@ def plot_constellation(symb, title="Constellation", filename=None, use_gradient=
     
     # С компенсацией фазы:
     plot_constellation(symbols, "TX OFDM (phase compensated)", phase_compensation=subc_phases)
+    
+    # С ограничением количества точек:
+    plot_constellation(symbols, "RX Constellation", max_points=2000)
     """
     if not PLOTTING_AVAILABLE or plt is None:
         # На мобильных платформах или при отсутствии matplotlib сохраняем данные в CSV
@@ -142,6 +149,14 @@ def plot_constellation(symb, title="Constellation", filename=None, use_gradient=
             title = title + " [phase compensated]"
             print(f"[PLOT-CONSTELLATION] Phase compensation applied")
         
+        # ОПТИМИЗАЦИЯ: прореживаем точки если их слишком много
+        if n_symbols > max_points:
+            print(f"[PLOT-CONSTELLATION] Downsampling from {n_symbols} to {max_points} points for faster rendering")
+            # Равномерно выбираем индексы для прореживания
+            indices_to_keep = np.linspace(0, n_symbols - 1, max_points, dtype=int)
+            symb = symb[indices_to_keep]
+            n_symbols = len(symb)
+        
         print(f"[PLOT-CONSTELLATION] Plotting {n_symbols} symbols, gradient={use_gradient}, modulation={modulation_type}")
         
         # Создаем фигуру
@@ -150,15 +165,15 @@ def plot_constellation(symb, title="Constellation", filename=None, use_gradient=
         if use_gradient and n_symbols > 1:
             # Создаем цветовую карту от синего к красному
             colors = [(0, 0, 1), (1, 0, 0)]  # синий -> красный
-            cmap = LinearSegmentedColormap.from_list('blue_to_red', colors, N=n_symbols)
+            cmap = LinearSegmentedColormap.from_list('blue_to_red', colors, N=256)
             
             # Индексы для градиента (от 0 до 1)
             indices = np.linspace(0, 1, n_symbols)
             
-            # Рисуем точки с градиентом
-            for i, (symbol, idx) in enumerate(zip(symb, indices)):
-                color = cmap(idx)
-                ax.scatter(symbol.real, symbol.imag, color=color, alpha=0.6, s=20, edgecolors='none')
+            # ОПТИМИЗАЦИЯ: рисуем все точки одним вызовом scatter с массивом цветов
+            # Это намного быстрее, чем рисовать каждую точку отдельно в цикле
+            colors_array = cmap(indices)
+            ax.scatter(np.real(symb), np.imag(symb), c=colors_array, alpha=0.6, s=20, edgecolors='none')
             
             # Добавляем цветовую шкалу
             sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=n_symbols))
@@ -209,6 +224,7 @@ def plot_constellation(symb, title="Constellation", filename=None, use_gradient=
         try:
             plt.savefig(filename, dpi=150, bbox_inches='tight')
             print(f"[PLOT-CONSTELLATION] Saved to {filename}")
+            
             plt.close(fig)
             return True
         except Exception as e:
@@ -220,6 +236,34 @@ def plot_constellation(symb, title="Constellation", filename=None, use_gradient=
         print(f"[PLOT-CONSTELLATION] Error plotting constellation: {e}")
         import traceback
         traceback.print_exc()
+        return False
+
+
+def save_constellation_csv(symb, filename="constellation_data.csv"):
+    """
+    Сохраняет данные созвездия в CSV файл.
+    
+    Параметры
+    ----------
+    symb : array-like
+        Список комплексных символов (I+Qj)
+    filename : str
+        Имя файла для сохранения
+        
+    Возвращает
+    -------
+    bool
+        True если данные успешно сохранены, False в случае ошибки
+    """
+    try:
+        import numpy as np
+        symb = np.asarray(symb, dtype=complex)
+        data = np.column_stack((np.real(symb), np.imag(symb)))
+        np.savetxt(filename, data, delimiter=",", header="I,Q", comments="")
+        print(f"[PLOT-CONSTELLATION] Data saved to {filename}")
+        return True
+    except Exception as e:
+        print(f"[PLOT-CONSTELLATION] Failed to save CSV: {e}")
         return False
 
 
@@ -238,11 +282,18 @@ def plot_signal(signal_data, fs, title="Signal", filename="signal.png"):
         except Exception as e:
             print(f"[PLOT] Failed to save signal data: {e}")
         return
-    
+     
     try:
         import numpy as np
-        plt.figure(figsize=(10, 4))
+        
+        # Сохраняем данные в CSV параллельно с PNG
         t = np.arange(len(signal_data)) / fs
+        data = np.column_stack((t, signal_data))
+        csv_fname = title.replace(" ", "_") + "_data.csv"
+        np.savetxt(csv_fname, data, delimiter=",", header="Time,Amplitude", comments="")
+        print(f"[PLOT] Signal data saved to {csv_fname}")
+        
+        plt.figure(figsize=(10, 4))
         plt.plot(t, signal_data, linewidth=0.5)
         plt.title(title)
         plt.xlabel("Time (s)")
@@ -274,9 +325,16 @@ def plot_spectrum(freq, spectrum, title="Spectrum", filename="spectrum.png"):
         except Exception as e:
             print(f"[PLOT] Failed to save spectrum data: {e}")
         return
-    
+     
     try:
         import numpy as np
+        
+        # Сохраняем данные в CSV параллельно с PNG
+        data = np.column_stack((freq, spectrum))
+        csv_fname = title.replace(" ", "_") + "_data.csv"
+        np.savetxt(csv_fname, data, delimiter=",", header="Frequency,Power", comments="")
+        print(f"[PLOT] Spectrum data saved to {csv_fname}")
+        
         plt.figure(figsize=(10, 4))
         plt.plot(freq, spectrum, linewidth=0.5)
         plt.title(title)
@@ -622,13 +680,24 @@ def plot_tx_diagrams(signal, fs, title_prefix="TX"):
         except Exception as e:
             print(f"[PLOT] Failed to save TX data: {e}")
         return
-    
+     
     try:
         import numpy as np
         
+        # Вычисляем общие данные для CSV
+        t = np.arange(len(signal)) / fs
+        freqs = np.fft.fftfreq(len(signal), 1.0/fs) if len(signal) > 0 else np.array([])
+        spectrum = np.abs(np.fft.fft(signal)) if len(signal) > 0 else np.array([])
+        mask = freqs >= 0 if len(freqs) > 0 else np.array([], dtype=bool)
+        
+        # Сохраняем данные сигнала в CSV
+        data_signal = np.column_stack((t, signal))
+        csv_fname1 = f"{title_prefix}_signal_data.csv"
+        np.savetxt(csv_fname1, data_signal, delimiter=",", header="Time,Amplitude", comments="")
+        print(f"[PLOT] TX signal data saved to {csv_fname1}")
+        
         # 1. График сигнала во временной области
         plt.figure(figsize=(10, 4))
-        t = np.arange(len(signal)) / fs
         plt.plot(t, signal, linewidth=0.5)
         plt.title(f"{title_prefix} Signal (Time Domain)")
         plt.xlabel("Time (s)")
@@ -639,12 +708,16 @@ def plot_tx_diagrams(signal, fs, title_prefix="TX"):
         print(f"[PLOT] TX signal plot saved to {fname1}")
         plt.close()
         
+        # Сохраняем данные спектра в CSV
+        if len(spectrum) > 0 and np.any(mask):
+            data_spectrum = np.column_stack((freqs[mask], spectrum[mask]))
+            csv_fname2 = f"{title_prefix}_spectrum_data.csv"
+            np.savetxt(csv_fname2, data_spectrum, delimiter=",", header="Frequency,Power", comments="")
+            print(f"[PLOT] TX spectrum data saved to {csv_fname2}")
+        
         # 2. Спектр сигнала
         if len(signal) > 0:
             plt.figure(figsize=(10, 4))
-            freqs = np.fft.fftfreq(len(signal), 1.0/fs)
-            spectrum = np.abs(np.fft.fft(signal))
-            mask = freqs >= 0
             plt.plot(freqs[mask], spectrum[mask], linewidth=0.5)
             plt.title(f"{title_prefix} Spectrum")
             plt.xlabel("Frequency (Hz)")
@@ -654,6 +727,14 @@ def plot_tx_diagrams(signal, fs, title_prefix="TX"):
             plt.savefig(fname2, dpi=150, bbox_inches="tight")
             print(f"[PLOT] TX spectrum plot saved to {fname2}")
             plt.close()
+        
+        # Сохраняем данные гистограммы в CSV
+        counts, bin_edges = np.histogram(signal, bins=50)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        data_hist = np.column_stack((bin_centers, counts))
+        csv_fname3 = f"{title_prefix}_histogram_data.csv"
+        np.savetxt(csv_fname3, data_hist, delimiter=",", header="Bin_Center,Count", comments="")
+        print(f"[PLOT] TX histogram data saved to {csv_fname3}")
         
         # 3. Гистограмма амплитуд
         plt.figure(figsize=(8, 4))
