@@ -1117,23 +1117,31 @@ def _plot_results():
     Построение графиков после завершения приёма.
 
     Включает:
-    - Итоговый график эквалайзера (Hk_smooth_list)
-    - График AGC по символам
-    - График созвездия (градиентный)
+    - Водопадная диаграмма эквалайзера (equalizer waterfall)
+    - График созвездия на приёме (RX constellation)
+    
+    Отключено:
+    - Итоговый график эквалайзера (Hk_smooth_list) - не используется
+    - График AGC по символам - не используется
     """
     try:
-        from plot_utils import plot_rx_equalizer_final, plot_agc_per_symbol, plot_constellation
+        from plot_utils import plot_constellation
 
-        if _rx_st.Hk_smooth_list and len(_rx_st.Hk_smooth_list) > 0:
-            print("[SP-PLOT] Построение итогового графика эквалайзера...")
-            plot_rx_equalizer_final(_rx_st.Hk_smooth_list, subc_inds, fs, Nfft)
+        # === Водопадная диаграмма эквалайзера (оставлено) ===
+        try:
+            from rx_decoder import save_equalizer_waterfall
+            if _rx_st.equalizer_history_list and len(_rx_st.equalizer_history_list) > 0:
+                result = save_equalizer_waterfall()
+                if result:
+                    print("[SP-PLOT] Водопадная диаграмма эквалайзера сохранена")
+                else:
+                    print("[SP-PLOT] Водопадная диаграмма не была сохранена (нет данных или ошибка)")
+            else:
+                print("[SP-PLOT] Нет данных истории эквалайзера для сохранения водопада")
+        except Exception as e:
+            print(f"[SP-PLOT] Не удалось сохранить водопад эквалайзера: {e}")
 
-        if _rx_st.agc_history_list and len(_rx_st.agc_history_list) > 0:
-            print("[SP-PLOT] Построение графика AGC...")
-            plot_agc_per_symbol(_rx_st.agc_history_list, title="AGC per Symbol")
-            _rx_st.agc_history_list.clear()
-            _rx_st._global_symbol_counter = 0
-
+        # === График созвездия на приёме (оставлено) ===
         if _rx_st.rx_constellation_symbols and len(_rx_st.rx_constellation_symbols) > 0:
             print(f"[SP-PLOT] Построение созвездия с "
                   f"{len(_rx_st.rx_constellation_symbols)} символами...")
@@ -1147,19 +1155,17 @@ def _plot_results():
                 )
             _rx_st.rx_constellation_symbols.clear()
 
-        # Сохраняем водопадную диаграмму эквалайзера
-        try:
-            from rx_decoder import save_equalizer_waterfall
-            if _rx_st.equalizer_history_list and len(_rx_st.equalizer_history_list) > 0:
-                result = save_equalizer_waterfall()
-                if result:
-                    print("[SP-PLOT] Водопадная диаграмма эквалайзера сохранена")
-                else:
-                    print("[SP-PLOT] Водопадная диаграмма не была сохранена (нет данных или ошибка)")
-            else:
-                print("[SP-PLOT] Нет данных истории эквалайзера для сохранения водопада")
-        except Exception as e:
-            print(f"[SP-PLOT] Не удалось сохранить водопад эквалайзера: {e}")
+        # === Отключено: Итоговый график эквалайзера ===
+        # if _rx_st.Hk_smooth_list and len(_rx_st.Hk_smooth_list) > 0:
+        #     print("[SP-PLOT] Построение итогового графика эквалайзера...")
+        #     plot_rx_equalizer_final(_rx_st.Hk_smooth_list, subc_inds, fs, Nfft)
+
+        # === Отключено: График AGC по символам ===
+        # if _rx_st.agc_history_list and len(_rx_st.agc_history_list) > 0:
+        #     print("[SP-PLOT] Построение графика AGC...")
+        #     plot_agc_per_symbol(_rx_st.agc_history_list, title="AGC per Symbol")
+        #     _rx_st.agc_history_list.clear()
+        #     _rx_st._global_symbol_counter = 0
 
     except Exception as e:
         print(f"[SP-PLOT] Ошибка при построении графиков: {e}")

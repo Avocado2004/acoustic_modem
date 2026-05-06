@@ -175,37 +175,32 @@ def receive_from_file(wav_path):
             f.write(rec_text)
         print(f"[RX TEXT] Saved to: {out_path}")
     
-    # Построение итогового графика эквалайзера
-    if PLOTTING_AVAILABLE:
-        try:
-            from plot_utils import plot_rx_equalizer_final
-            # Используем переменные из rx_state
-            if _rx_st.Hk_smooth_list and len(_rx_st.Hk_smooth_list) > 0:
-                print(f"[RX] Построение итогового графика эквалайзера...")
-                plot_rx_equalizer_final(_rx_st.Hk_smooth_list, subc_inds, fs, Nfft)
-        except Exception as e:
-            print(f"[RX] Ошибка при построении итогового графика эквалайзера: {e}")
+    # === Отключено: Построение итогового графика эквалайзера ===
+    # if PLOTTING_AVAILABLE:
+    #     try:
+    #         from plot_utils import plot_rx_equalizer_final
+    #         if _rx_st.Hk_smooth_list and len(_rx_st.Hk_smooth_list) > 0:
+    #             print(f"[RX] Построение итогового графика эквалайзера...")
+    #             plot_rx_equalizer_final(_rx_st.Hk_smooth_list, subc_inds, fs, Nfft)
+    #     except Exception as e:
+    #         print(f"[RX] Ошибка при построении итогового графика эквалайзера: {e}")
     
-    # Построение графика AGC по окончании приёма из файла
-    if PLOTTING_AVAILABLE:
-        try:
-            from plot_utils import plot_agc_per_symbol
-            # Используем переменные из rx_state
-            if _rx_st.agc_history_list and len(_rx_st.agc_history_list) > 0:
-                print(f"[RX] Построение графика AGC по окончании приёма из файла...")
-                plot_agc_per_symbol(_rx_st.agc_history_list, title="AGC per Symbol (File Mode)")
-                # Очищаем список после построения графика
-                _rx_st.agc_history_list.clear()
-                # Используем переменные из rx_state
-                _rx_st._global_symbol_counter = 0
-        except Exception as e:
-            print(f"[RX] Ошибка при построении графика AGC: {e}")
+    # === Отключено: Построение графика AGC ===
+    # if PLOTTING_AVAILABLE:
+    #     try:
+    #         from plot_utils import plot_agc_per_symbol
+    #         if _rx_st.agc_history_list and len(_rx_st.agc_history_list) > 0:
+    #             print(f"[RX] Построение графика AGC по окончании приёма из файла...")
+    #             plot_agc_per_symbol(_rx_st.agc_history_list, title="AGC per Symbol (File Mode)")
+    #             _rx_st.agc_history_list.clear()
+    #             _rx_st._global_symbol_counter = 0
+    #     except Exception as e:
+    #         print(f"[RX] Ошибка при построении графика AGC: {e}")
     
-    # Отрисовка созвездия с градиентом (синий->красный) по порядку символов
+    # === Оставлено: Отрисовка созвездия с градиентом (синий->красный) по порядку символов ===
     if PLOTTING_AVAILABLE:
         try:
             from plot_utils import plot_constellation
-            # Используем переменные из rx_state
             if _rx_st.rx_constellation_symbols and len(_rx_st.rx_constellation_symbols) > 0:
                 print(f"[DEBUG] Вызов plot_constellation с {len(_rx_st.rx_constellation_symbols)} символами")
                 plot_constellation(_rx_st.rx_constellation_symbols, "RX Constellation (gradient)", use_gradient=True)
