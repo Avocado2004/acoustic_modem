@@ -97,6 +97,7 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         R1t = np.fft.fft(rx_pre1_corr) / Nfft
         R2t = np.fft.fft(rx_pre2_corr) / Nfft
         
+        # Оценка фазового сдвига из ZC-последовательности
         phi_est = 0.0
         if S_zc_fd is not None:
             try:
@@ -104,10 +105,9 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
                 phi_est = np.angle(np.vdot(S_zc_fd, Rzc))
             except Exception:
                 phi_est = 0.0
-        if phi_est != 0.0:
-            R1t = R1t * np.exp(-1j * phi_est)
-            R2t = R2t * np.exp(-1j * phi_est)
         
+        # Вычисляем Hk_est БЕЗ компенсации phi_est
+        # (phi_est будет компенсирован в данных перед эквалайзером)
         S_ref = np.fft.fft(_rx_st.preamble_td[2*SYMBOL_LEN + Ncp : 2*SYMBOL_LEN + Ncp + Nfft]) / Nfft
         Hk_est = (R1t[subc_inds] / S_ref[subc_inds] + R2t[subc_inds] / S_ref[subc_inds]) / 2
         Hk_mag_raw = np.median(np.abs(Hk_est)) if hasattr(np, 'median') else np.mean(np.abs(Hk_est))
@@ -203,6 +203,9 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         
         try:
             F = np.fft.fft(useful_corr) / Nfft
+            # Компенсируем фазовый сдвиг из ZC-последовательности
+            if phi_est != 0.0:
+                F = F * np.exp(-1j * phi_est)
             subc = equalizer.process(F[subc_inds])
             # Отладочный вывод амплитуды после эквалайзера
             if AGC_DEBUG and idxf < 3:
