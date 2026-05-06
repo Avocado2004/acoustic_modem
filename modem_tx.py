@@ -429,82 +429,67 @@ def _transmit_data(data_bytes, total_data_len, filename_bytes, mode='T', packet_
     tx_clipped, achieved_crest = apply_softclip_to_target_crest(tx_out, target_db=TARGET_CREST_DB)
     print(f"[SOFTCLIP] achieved crest = {achieved_crest:.3f} dB (target {TARGET_CREST_DB} dB)")
     
-    # Сохраняем диаграммы переданного сигнала
-    if PLOTTING_AVAILABLE:
-        try:
-            from plot_utils import plot_tx_diagrams
-            plot_tx_diagrams(tx_clipped, fs)
-        except Exception as e:
-            print(f"[TX] Ошибка при сохранении диаграмм: {e}")
+    # === Отключено: Диаграммы переданного сигнала ===
+    # if PLOTTING_AVAILABLE:
+    #     try:
+    #         from plot_utils import plot_tx_diagrams
+    #         plot_tx_diagrams(tx_clipped, fs)
+    #     except Exception as e:
+    #         print(f"[TX] Ошибка при сохранении диаграмм: {e}")
     
-    # Сохраняем созвездие передачи (TX constellation diagram) - идеальное (до OFDM)
-    if PLOTTING_AVAILABLE and PLOT_CONSTELLATION:
-        try:
-            from plot_utils import plot_constellation
-            # Собираем все символы передачи для визуализации
-            tx_constellation_symbols = _collect_tx_constellation_symbols(
-                data_bytes, transmission_header, filename_bytes, mode, packet_blocks
-            )
-            if tx_constellation_symbols and len(tx_constellation_symbols) > 0:
-                plot_constellation(
-                    tx_constellation_symbols,
-                    title="TX Constellation",
-                    filename=CONSTELLATION_TX_FILENAME,
-                    use_gradient=CONSTELLATION_USE_GRADIENT,
-                    modulation_type=modem_config.MODULATION
-                )
-                print(f"[TX] Constellation diagram saved to {CONSTELLATION_TX_FILENAME}")
-        except Exception as e:
-            print(f"[TX] Ошибка при сохранении созвездия: {e}")
+    # === Отключено: Созвездие передачи (TX constellation) ===
+    # if PLOTTING_AVAILABLE and PLOT_CONSTELLATION:
+    #     try:
+    #         from plot_utils import plot_constellation
+    #         tx_constellation_symbols = _collect_tx_constellation_symbols(
+    #             data_bytes, transmission_header, filename_bytes, mode, packet_blocks
+    #         )
+    #         if tx_constellation_symbols and len(tx_constellation_symbols) > 0:
+    #             plot_constellation(
+    #                 tx_constellation_symbols,
+    #                 title="TX Constellation",
+    #                 filename=CONSTELLATION_TX_FILENAME,
+    #                 use_gradient=CONSTELLATION_USE_GRADIENT,
+    #                 modulation_type=modem_config.MODULATION
+    #             )
+    #             print(f"[TX] Constellation diagram saved to {CONSTELLATION_TX_FILENAME}")
+    #     except Exception as e:
+    #         print(f"[TX] Ошибка при сохранении созвездия: {e}")
     
-    # Сохраняем созвездие после OFDM-модуляции (FD символы до IFFT, до soft clipping)
-    if PLOTTING_AVAILABLE and PLOT_CONSTELLATION and PLOT_CONSTELLATION_TX_OFDM:
-        try:
-            from plot_utils import plot_constellation
-            # Собираем FD символы после OFDM-обработки
-            tx_ofdm_constellation_symbols = _collect_tx_ofdm_constellation_symbols(
-                data_bytes, transmission_header, filename_bytes, mode, packet_blocks
-            )
-            if tx_ofdm_constellation_symbols and len(tx_ofdm_constellation_symbols) > 0:
-                plot_constellation(
-                    tx_ofdm_constellation_symbols,
-                    title="TX Constellation (after OFDM, before clipping)",
-                    filename=CONSTELLATION_TX_OFDM_FILENAME,
-                    use_gradient=CONSTELLATION_USE_GRADIENT,
-                    modulation_type=modem_config.MODULATION
-                )
-                print(f"[TX] OFDM constellation diagram saved to {CONSTELLATION_TX_OFDM_FILENAME}")
-                
-                # Сохраняем компенсированное созвездие (без начального фазового сдвига)
-                if CONSTELLATION_TX_OFDM_COMPENSATE_PHASE:
-                    print(f"[TX] Generating phase-compensated OFDM constellation diagram...")
-                    
-                    # Получаем фазы поднесущих из modem_config
-                    subc_phases = modem_config.subc_phases
-                    
-                    if subc_phases is not None and len(subc_phases) > 0:
-                        # Повторяем фазы для всех OFDM символов
-                        n_ofdm_symbols = len(tx_ofdm_constellation_symbols) // Nsub
-                        phases_repeated = np.tile(subc_phases, n_ofdm_symbols)
-                        
-                        print(f"[TX] Applying phase compensation: {len(tx_ofdm_constellation_symbols)} symbols, "
-                              f"{n_ofdm_symbols} OFDM symbols, {len(phases_repeated)} phases")
-                        
-                        plot_constellation(
-                            tx_ofdm_constellation_symbols,
-                            title="TX Constellation (after OFDM, phase compensated)",
-                            filename=CONSTELLATION_TX_OFDM_COMPENSATED_FILENAME,
-                            use_gradient=CONSTELLATION_USE_GRADIENT,
-                            modulation_type=modem_config.MODULATION,
-                            phase_compensation=phases_repeated
-                        )
-                        print(f"[TX] Phase-compensated OFDM constellation saved to {CONSTELLATION_TX_OFDM_COMPENSATED_FILENAME}")
-                    else:
-                        print(f"[TX] Warning: subc_phases is None or empty, skipping phase compensation")
-        except Exception as e:
-            print(f"[TX] Ошибка при сохранении OFDM созвездия: {e}")
-            import traceback
-            traceback.print_exc()
+    # === Отключено: Созвездие после OFDM-модуляции ===
+    # if PLOTTING_AVAILABLE and PLOT_CONSTELLATION and PLOT_CONSTELLATION_TX_OFDM:
+    #     try:
+    #         from plot_utils import plot_constellation
+    #         tx_ofdm_constellation_symbols = _collect_tx_ofdm_constellation_symbols(
+    #             data_bytes, transmission_header, filename_bytes, mode, packet_blocks
+    #         )
+    #         if tx_ofdm_constellation_symbols and len(tx_ofdm_constellation_symbols) > 0:
+    #             plot_constellation(
+    #                 tx_ofdm_constellation_symbols,
+    #                 title="TX Constellation (after OFDM, before clipping)",
+    #                 filename=CONSTELLATION_TX_OFDM_FILENAME,
+    #                 use_gradient=CONSTELLATION_USE_GRADIENT,
+    #                 modulation_type=modem_config.MODULATION
+    #             )
+    #             print(f"[TX] OFDM constellation diagram saved to {CONSTELLATION_TX_OFDM_FILENAME}")
+    #
+    #             if CONSTELLATION_TX_OFDM_COMPENSATE_PHASE:
+    #                 print(f"[TX] Generating phase-compensated OFDM constellation diagram...")
+    #                 subc_phases = modem_config.subc_phases
+    #                 if subc_phases is not None and len(subc_phases) > 0:
+    #                     n_ofdm_symbols = len(tx_ofdm_constellation_symbols) // Nsub
+    #                     phases_repeated = np.tile(subc_phases, n_ofdm_symbols)
+    #                     plot_constellation(
+    #                         tx_ofdm_constellation_symbols,
+    #                         title="TX Constellation (after OFDM, phase compensated)",
+    #                         filename=CONSTELLATION_TX_OFDM_COMPENSATED_FILENAME,
+    #                         use_gradient=CONSTELLATION_USE_GRADIENT,
+    #                         modulation_type=modem_config.MODULATION,
+    #                         phase_compensation=phases_repeated
+    #                     )
+    #                     print(f"[TX] Phase-compensated OFDM constellation saved to {CONSTELLATION_TX_OFDM_COMPENSATED_FILENAME}")
+    #     except Exception as e:
+    #         print(f"[TX] Ошибка при сохранении OFDM созвездия: {e}")
     
     max_abs = np.max(np.abs(tx_clipped)) if tx_clipped.size else 0.0
     if max_abs == 0:
