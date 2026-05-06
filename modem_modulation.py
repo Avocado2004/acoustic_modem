@@ -586,10 +586,10 @@ class AdaptiveEqualizer:
         # Сохраняем историю с заданным шагом
         if self.store_history and (self.symbol_count % self.history_step == 0 or self.symbol_count == 1):
             self.history.append(self.Hk.copy())
-            if self.symbol_count % 100 == 0:
-                avg_mag = np.mean(np.abs(self.Hk))
-                print(f"[EQ-DEBUG] Сохранено {len(self.history)} состояний Hk (символ {self.symbol_count}), "
-                      f"|Hk|_avg={avg_mag:.4f}")
+            # if self.symbol_count % 100 == 0:
+            #     avg_mag = np.mean(np.abs(self.Hk))
+            #     print(f"[EQ-DEBUG] Сохранено {len(self.history)} состояний Hk (символ {self.symbol_count}), "
+            #           f"|Hk|_avg={avg_mag:.4f}")
         
         return x_hat
     

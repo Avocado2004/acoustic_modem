@@ -197,8 +197,8 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         # Сохраняем текущее состояние Hk в историю эквалайзера для водопадной диаграммы
         try:
             _rx_st.equalizer_history_list.append(equalizer.get_current_Hk().copy())
-            print(f"[EQ-HIST] Сохранен снимок Hk #{len(_rx_st.equalizer_history_list)} "
-                  f"для символа {idxf} пакета {packet_idx}")
+            # print(f"[EQ-HIST] Сохранен снимок Hk #{len(_rx_st.equalizer_history_list)} "
+            #       f"для символа {idxf} пакета {packet_idx}")
         except Exception as e:
             print(f"[EQ-HIST] Ошибка сохранения Hk: {e}")
         
@@ -216,7 +216,7 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         
         # Сохраняем символы для градиентного созвездия
         _rx_st.rx_constellation_symbols.extend(subc)
-        print(f"[DEBUG] Добавлено {len(subc)} символов, всего: {len(_rx_st.rx_constellation_symbols)}")
+        # print(f"[DEBUG] Добавлено {len(subc)} символов, всего: {len(_rx_st.rx_constellation_symbols)}")
     
     if len(rx_syms_pkt_list) == 0:
         return None

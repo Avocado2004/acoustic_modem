@@ -76,10 +76,10 @@ class EqualizerWaterfall:
         # Вычисляем реальные частоты поднесущих в Гц
         self._freqs = self.subc_inds * self.fs / self.Nfft
         
-        print(f"[EQ-WF] EqualizerWaterfall создан: max_symbols={max_symbols}, "
-              f"step={step}, n_subcarriers={len(subc_inds)}, "
-              f"freq_range=[{self._freqs[0]:.1f}..{self._freqs[-1]:.1f}] Гц, "
-              f"PLOTTING_AVAILABLE={PLOTTING_AVAILABLE}, save_on_close={save_on_close}")
+        # print(f"[EQ-WF] EqualizerWaterfall создан: max_symbols={max_symbols}, "
+        #       f"step={step}, n_subcarriers={len(subc_inds)}, "
+        #       f"freq_range=[{self._freqs[0]:.1f}..{self._freqs[-1]:.1f}] Гц, "
+        #       f"PLOTTING_AVAILABLE={PLOTTING_AVAILABLE}, save_on_close={save_on_close}")
 
     def update(self, Hk_snapshot):
         """
@@ -88,7 +88,7 @@ class EqualizerWaterfall:
         :param Hk_snapshot: Комплексный массив Hk длиной Nsub.
         """
         if Hk_snapshot is None:
-            print("[EQ-WF] update() получил None, пропуск")
+            # print("[EQ-WF] update() получил None, пропуск")
             return
         
         # Добавляем снимок в буфер
@@ -98,9 +98,9 @@ class EqualizerWaterfall:
         if len(self._Hk_snapshots) > self.max_symbols:
             self._Hk_snapshots = self._Hk_snapshots[-self.max_symbols:]
         
-        print(f"[EQ-WF] Добавлен снимок #{len(self._Hk_snapshots)}, "
-              f"|Hk| mean={np.mean(np.abs(Hk_snapshot)):.4f}, "
-              f"phase mean={np.mean(np.angle(Hk_snapshot)):.4f}")
+        # print(f"[EQ-WF] Добавлен снимок #{len(self._Hk_snapshots)}, "
+        #       f"|Hk| mean={np.mean(np.abs(Hk_snapshot)):.4f}, "
+        #       f"phase mean={np.mean(np.angle(Hk_snapshot)):.4f}")
 
     def update_from_history(self, equalizer_history_list):
         """
@@ -111,7 +111,7 @@ class EqualizerWaterfall:
             Может быть также плоским списком массивов Hk.
         """
         if not equalizer_history_list:
-            print("[EQ-WF] update_from_history() получил пустую историю")
+            # print("[EQ-WF] update_from_history() получил пустую историю")
             return
         
         # Определяем формат: вложенный список (по пакетам) или плоский
@@ -136,7 +136,7 @@ class EqualizerWaterfall:
         if len(self._Hk_snapshots) > self.max_symbols:
             self._Hk_snapshots = self._Hk_snapshots[-self.max_symbols:]
         
-        print(f"[EQ-WF] Загружено {len(self._Hk_snapshots)} снимков из истории")
+        # print(f"[EQ-WF] Загружено {len(self._Hk_snapshots)} снимков из истории")
 
     def save(self, filename=None):
         """
@@ -153,11 +153,11 @@ class EqualizerWaterfall:
         :return: True если сохранение успешно, False в случае ошибки.
         """
         if not PLOTTING_AVAILABLE:
-            print("[EQ-WF] save() пропущен — matplotlib недоступен")
+            # print("[EQ-WF] save() пропущен — matplotlib недоступен")
             return False
         
         if len(self._Hk_snapshots) == 0:
-            print("[EQ-WF] save() пропущен — нет снимков для сохранения")
+            # print("[EQ-WF] save() пропущен — нет снимков для сохранения")
             return False
         
         filename = filename or self.save_filename
@@ -167,9 +167,9 @@ class EqualizerWaterfall:
             snapshots_to_plot = self._Hk_snapshots[::self.step]
             n_snapshots = len(snapshots_to_plot)
             
-            print(f"[EQ-WF] Сохранение водопада: {len(self._Hk_snapshots)} снимков, "
-                  f"отрисовывается {n_snapshots} (step={self.step}), "
-                  f"{len(self.subc_inds)} поднесущих -> {filename}")
+            # print(f"[EQ-WF] Сохранение водопада: {len(self._Hk_snapshots)} снимков, "
+            #       f"отрисовывается {n_snapshots} (step={self.step}), "
+            #       f"{len(self.subc_inds)} поднесущих -> {filename}")
             
             # Цветовая карта coolwarm: синий -> белый -> красный
             cmap = cm.coolwarm
@@ -240,10 +240,13 @@ class EqualizerWaterfall:
             
             # Сохраняем в файл
             fig.savefig(filename, dpi=150, bbox_inches='tight')
-            print(f"[EQ-WF] Водопадная диаграмма сохранена: {filename}")
+            # print(f"[EQ-WF] Водопадная диаграмма сохранена: {filename}")
             
             # Закрываем фигуру для освобождения памяти
             plt.close(fig)
+            
+            # Параллельно сохраняем данные в CSV
+            self.save_csv()
             
             return True
             
@@ -253,19 +256,90 @@ class EqualizerWaterfall:
             traceback.print_exc()
             return False
 
+    def save_csv(self, filename=None):
+        """
+        Сохраняет данные водопадной диаграммы в CSV файл.
+        
+        Формат CSV:
+        - Первый столбец: Frequency (Hz)
+        - Последующие столбцы: Amplitude_dB и Phase для каждого снимка (step-й)
+        
+        :param filename: Имя файла для сохранения. Если None — используется save_filename с заменой .png на _data.csv
+        :return: True если сохранение успешно, False в случае ошибки.
+        """
+        if len(self._Hk_snapshots) == 0:
+            # print("[EQ-WF] save_csv() пропущен — нет снимков для сохранения")
+            return False
+        
+        # Определяем имя CSV файла
+        if filename is None:
+            # Заменяем расширение .png на _data.csv или добавляем _data.csv
+            base_name = self.save_filename
+            if base_name.endswith('.png'):
+                filename = base_name[:-4] + '_data.csv'
+            else:
+                filename = base_name + '_data.csv'
+        
+        try:
+            # Выбираем каждый step-й снимок для сохранения
+            snapshots_to_save = self._Hk_snapshots[::self.step]
+            n_snapshots = len(snapshots_to_save)
+            
+            # print(f"[EQ-WF] Сохранение CSV: {len(self._Hk_snapshots)} снимков, "
+            #       f"сохраняется {n_snapshots} (step={self.step}), "
+            #       f"{len(self.subc_inds)} поднесущих -> {filename}")
+            
+            # Формируем заголовок CSV
+            header_parts = ["Frequency_Hz"]
+            for i in range(n_snapshots):
+                header_parts.append(f"Snapshot_{i}_Amplitude_dB")
+                header_parts.append(f"Snapshot_{i}_Phase_rad")
+            header = ",".join(header_parts)
+            
+            # Формируем данные
+            # Строки: каждая строка - одна поднесущая
+            # Столбцы: Frequency, Amp_dB_1, Phase_1, Amp_dB_2, Phase_2, ...
+            n_subcarriers = len(self.subc_inds)
+            data = np.zeros((n_subcarriers, 1 + 2 * n_snapshots))
+            
+            # Первый столбец - частоты
+            data[:, 0] = self._freqs
+            
+            # Заполняем амплитуды и фазы для каждого снимка
+            for i, hk in enumerate(snapshots_to_save):
+                amplitude = np.abs(hk)
+                amplitude_db = 20.0 * np.log10(np.maximum(amplitude, 1e-12))
+                phase = np.angle(hk)
+                
+                data[:, 1 + 2*i] = amplitude_db
+                data[:, 2 + 2*i] = phase
+            
+            # Сохраняем в CSV
+            np.savetxt(filename, data, delimiter=",", header=header, comments="")
+            # print(f"[EQ-WF] Данные водопадной диаграммы сохранены в CSV: {filename}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"[EQ-WF] Ошибка сохранения CSV: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def close(self):
         """
         Закрывает водопадную диаграмму.
-        Если save_on_close=True — автоматически сохраняет перед закрытием.
+        Если save_on_close=True — автоматически сохраняет перед закрытием (PNG + CSV).
         """
         if self.save_on_close:
             self.save()
+            self.save_csv()
         
         # Очищаем ресурсы
         self._fig = None
         self._ax_amp = None
         self._ax_phase = None
-        print("[EQ-WF] EqualizerWaterfall закрыт")
+        # print("[EQ-WF] EqualizerWaterfall закрыт")
 
     def get_snapshot_count(self):
         """
@@ -288,7 +362,7 @@ class EqualizerWaterfall:
         Очищает буфер снимков.
         """
         self._Hk_snapshots.clear()
-        print("[EQ-WF] Буфер снимков очищен")
+        # print("[EQ-WF] Буфер снимков очищен")
 
     def __del__(self):
         """Деструктор — сохраняет и закрывает при удалении объекта."""
