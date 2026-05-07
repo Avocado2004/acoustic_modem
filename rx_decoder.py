@@ -9,7 +9,8 @@ import modem_config
 from modem_config import (Nfft, Ncp, Nsub, subc_inds, fs, SYMBOL_LEN, DEFAULT_PACKET_BLOCKS,
                            RS_CW_BITS, RS_DATA_BYTES,
                            RS_CW_BYTES, rs, SYMBOL_TARGET_RMS, AGC_ALPHA, AGC_DEBUG, MIN_RMS,
-                           PLOTTING_AVAILABLE, _MAX_RS_FAIL_PRINTS_GLOBAL, SYNC_WINDOW_HALF)
+                           PLOTTING_AVAILABLE, _MAX_RS_FAIL_PRINTS_GLOBAL, SYNC_WINDOW_HALF,
+                           PREAMBLE_PILOT_SYMBOLS)
 
 from modem_modulation import (qpsk_demap, bpsk_demap, ofdm_symbol, build_preamble, bytes_to_bits, bits_to_bytes,
                            sync_by_corr, deinterleave_bits, AdaptiveEqualizer)
@@ -38,6 +39,97 @@ assert hasattr(_rx_st, 'global_equalizer'), "rx_state должен содерж�
 assert hasattr(_rx_st, 'agc_history_list'), "rx_state должен содержать agc_history_list"
 assert hasattr(_rx_st, '_global_symbol_counter'), "rx_state должен содержать _global_symbol_counter"
 assert hasattr(_rx_st, 'rx_constellation_symbols'), "rx_state должен содержать rx_constellation_symbols"
+
+
+# -----------------------
+# Функция извлечения пилотных символов для настройки эквалайзера и AGC
+# -----------------------
+def _extract_pilot_symbols(pref_abs, f_err_loc):
+    """
+    Извлечение и усреднение пилотных символов перед преамбулой.
+    
+    Пилотные символы идут ДО преамбулы (ZC+ZC+P+P) и содержат известные данные:
+    все поднесущие = (1+1j)/√2.
+    
+    Это позволяет:
+    1. Получить точную оценку канала Hk по 16 пилотам (вместо 2 в преамбуле)
+    2. Инициализировать AGC из реального RMS пилотов
+    
+    Параметры
+    ----------
+    pref_abs : int
+        Абсолютная позиция начала преамбулы (ZC1)
+    f_err_loc : float
+        Локальная частотная ошибка для компенсации
+    
+    Возвращает
+    -------
+    tuple (Hk_pilot, pilot_rms)
+        Hk_pilot : np.ndarray - усреднённая оценка канала по пилотам
+        pilot_rms : float - RMS пилотных символов для инициализации AGC
+    """
+    n_pilots = PREAMBLE_PILOT_SYMBOLS
+    
+    if n_pilots <= 0:
+        return None, None
+    
+    # Позиция пилотов: перед преамбулой
+    pilot_start = pref_abs - n_pilots * SYMBOL_LEN
+    
+    if pilot_start < 0:
+        print(f"[RX-PILOT] pilot_start={pilot_start} < 0, skipping pilot extraction")
+        return None, None
+    
+    # Эталонный пилотный символ: все поднесущие = (1+1j)/√2
+    S_pilot_ref = (1 + 1j) / np.sqrt(2) * np.ones(Nsub, dtype=complex)
+    
+    Hk_sum = np.zeros(Nsub, dtype=complex)
+    pilot_rms_sum = 0.0
+    valid_pilots = 0
+    
+    for i in range(n_pilots):
+        # Начало i-го пилотного символа
+        sym_start = pilot_start + i * SYMBOL_LEN
+        
+        # Проверяем, что символ полностью в буфере
+        if sym_start + SYMBOL_LEN > _rx_st.rx.size:
+            print(f"[RX-PILOT] pilot {i} out of buffer, skipping")
+            continue
+        
+        # Вырезаем useful часть (без CP)
+        useful = _rx_st.rx[sym_start + Ncp : sym_start + Ncp + Nfft]
+        
+        if useful.size < Nfft:
+            print(f"[RX-PILOT] pilot {i} too short, skipping")
+            continue
+        
+        # Компенсируем частотный сдвиг
+        t_sym_start = sym_start / float(fs)
+        time_vec = np.arange(Nfft) / float(fs)
+        useful_corr = useful * np.exp(-1j * 2.0 * np.pi * f_err_loc * (t_sym_start + time_vec))
+        
+        # FFT → получаем принятые поднесущие
+        R = np.fft.fft(useful_corr) / Nfft
+        
+        # Оценка канала для этого символа: Hk_i = R / S_ref
+        Hk_i = R[subc_inds] / S_pilot_ref
+        
+        Hk_sum += Hk_i
+        pilot_rms_sum += np.sqrt(np.mean(np.abs(useful)**2))
+        valid_pilots += 1
+    
+    if valid_pilots == 0:
+        print("[RX-PILOT] no valid pilots extracted")
+        return None, None
+    
+    # Усредняем оценки канала по всем валидным пилотам
+    Hk_pilot = Hk_sum / valid_pilots
+    pilot_rms = pilot_rms_sum / valid_pilots
+    
+    print(f"[RX-PILOT] Extracted {valid_pilots}/{n_pilots} pilots, "
+          f"Hk_avg_mag={np.mean(np.abs(Hk_pilot)):.4f}, pilot_rms={pilot_rms:.6f}")
+    
+    return Hk_pilot, pilot_rms
 
 
 # -----------------------
@@ -97,7 +189,6 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         R1t = np.fft.fft(rx_pre1_corr) / Nfft
         R2t = np.fft.fft(rx_pre2_corr) / Nfft
         
-        # Оценка фазового сдвига из ZC-последовательности
         phi_est = 0.0
         if S_zc_fd is not None:
             try:
@@ -105,9 +196,10 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
                 phi_est = np.angle(np.vdot(S_zc_fd, Rzc))
             except Exception:
                 phi_est = 0.0
+        if phi_est != 0.0:
+            R1t = R1t * np.exp(-1j * phi_est)
+            R2t = R2t * np.exp(-1j * phi_est)
         
-        # Вычисляем Hk_est БЕЗ компенсации phi_est
-        # (phi_est будет компенсирован в данных перед эквалайзером)
         S_ref = np.fft.fft(_rx_st.preamble_td[2*SYMBOL_LEN + Ncp : 2*SYMBOL_LEN + Ncp + Nfft]) / Nfft
         Hk_est = (R1t[subc_inds] / S_ref[subc_inds] + R2t[subc_inds] / S_ref[subc_inds]) / 2
         Hk_mag_raw = np.median(np.abs(Hk_est)) if hasattr(np, 'median') else np.mean(np.abs(Hk_est))
@@ -118,9 +210,25 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         print(f"[EQ-INIT] Hk_est: median_abs={Hk_mag_raw:.4f}, clipped={Hk_mag:.4f}, mean_phase={np.mean(np.angle(Hk_est)):.4f} rad")
         print(f"[EQ-INIT] R1t[subc] rms={np.sqrt(np.mean(np.abs(R1t[subc_inds])**2)):.6f}, S_ref[subc] rms={np.sqrt(np.mean(np.abs(S_ref[subc_inds])**2)):.6f}")
         
+        # Пытаемся использовать пилотные символы для более точной оценки канала
+        Hk_pilot = None
+        pilot_rms = None
+        if PREAMBLE_PILOT_SYMBOLS > 0:
+            Hk_pilot, pilot_rms = _extract_pilot_symbols(pref_abs, f_err_loc)
+        
+        # Если пилоты успешно извлечены - используем их для инициализации эквалайзера
+        if Hk_pilot is not None:
+            # Усредняем Hk от пилотов и Hk от преамбулы для лучшей оценки
+            Hk_combined = (Hk_pilot + Hk_s) / 2
+            Hk_init = Hk_combined
+            print(f"[EQ-INIT] Using combined Hk (pilots + preamble): avg_mag={np.mean(np.abs(Hk_init)):.4f}")
+        else:
+            Hk_init = Hk_s
+            print(f"[EQ-INIT] Using preamble-only Hk: avg_mag={np.mean(np.abs(Hk_init)):.4f}")
+        
         # Создаем отдельный экземпляр эквалайзера для этой попытки
-        equalizer = AdaptiveEqualizer(initial_Hk=Hk_s, alpha=0.02, modulation=modulation)
-        print(f"[EQ] Modulation {modulation}: AdaptiveEqualizer initialized with alpha=0.02, initial_avg_mag={np.mean(np.abs(Hk_s)):.4f}")
+        equalizer = AdaptiveEqualizer(initial_Hk=Hk_init, alpha=0.02, modulation=modulation)
+        print(f"[EQ] Modulation {modulation}: AdaptiveEqualizer initialized with alpha=0.02, initial_avg_mag={np.mean(np.abs(Hk_init)):.4f}")
         
         # Создаём визуализацию водопадной диаграммы (если запрошена)
         waterfall = None
@@ -146,11 +254,25 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         return None
     
     try:
+        # Вычисляем pre_rms по преамбуле (ZC+ZC+P+P), без пилотных символов
+        # Пилоты идут ДО преамбулы, поэтому не включаем их
         pre_segment = _rx_st.rx[pref_abs : pref_abs + len(_rx_st.preamble_td)]
         pre_rms = np.sqrt(np.mean(pre_segment**2)) if pre_segment.size > 0 else MIN_RMS
         if pre_rms < MIN_RMS:
             pre_rms = MIN_RMS
         packet_gain = 0.5 / pre_rms
+        
+        # Инициализируем AGC из RMS пилотов, если они доступны
+        # Это даст правильный gain для данных с первого символа
+        if pilot_rms is not None and pilot_rms > MIN_RMS:
+            # Инициализируем last_agc_rms из реального RMS пилотов
+            # Масштабируем на packet_gain для согласованности
+            _rx_st.last_agc_rms = pilot_rms * packet_gain
+            print(f"[AGC-INIT] Initialized last_agc_rms from pilots: {pilot_rms:.6f} * {packet_gain:.6f} = {_rx_st.last_agc_rms:.6f}")
+        else:
+            # Fallback: используем pre_rms
+            _rx_st.last_agc_rms = pre_rms * packet_gain
+            print(f"[AGC-INIT] Initialized last_agc_rms from preamble: {pre_rms:.6f} * {packet_gain:.6f} = {_rx_st.last_agc_rms:.6f}")
     except Exception:
         packet_gain = 1.0
     
@@ -203,9 +325,6 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         
         try:
             F = np.fft.fft(useful_corr) / Nfft
-            # Компенсируем фазовый сдвиг из ZC-последовательности
-            if phi_est != 0.0:
-                F = F * np.exp(-1j * phi_est)
             subc = equalizer.process(F[subc_inds])
             # Отладочный вывод амплитуды после эквалайзера
             if AGC_DEBUG and idxf < 3:

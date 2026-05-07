@@ -591,7 +591,8 @@ class TestConstants:
         f_low = modem_config.k_low * df
         f_high = modem_config.k_high * df
         # Диапазон должен быть в слышимом спектре
-        assert f_low >= 300  # Минимум 300 Гц
+        # Низкие частоты лучше проходят через динамик/микрофон
+        assert f_low >= 180  # Минимум ~187.5 Гц (расширено вниз для лучшего прохождения)
         assert f_high <= modem_config.fs / 2  # Ниже частоты Найквиста
 
 

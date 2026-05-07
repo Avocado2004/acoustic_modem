@@ -19,7 +19,7 @@ from modem_config import (fs, Nfft, Ncp, Nsub, subc_inds,
                            PLOT_CONSTELLATION_TX_OFDM, CONSTELLATION_TX_OFDM_FILENAME,
                            CONSTELLATION_TX_OFDM_COMPENSATE_PHASE,
                            CONSTELLATION_TX_OFDM_COMPENSATED_FILENAME,
-                           WARMUP_SYMBOLS, WARMUP_LEVEL)
+                           PREAMBLE_PILOT_SYMBOLS, WARMUP_SYMBOLS, WARMUP_LEVEL)
 from modem_modulation import (qpsk_map, bpsk_map, bytes_to_bits, bits_to_bytes,
                                ofdm_symbol, build_preamble, build_data_td, zc_root_sequence,
                                interleave_bits)
@@ -273,71 +273,49 @@ def _collect_tx_ofdm_constellation_symbols(data_bytes, header_bytes, filename_by
     return ofdm_constellation_symbols
 
 
-def _generate_warmup_symbols(rng, n_symbols, modulation):
+def _generate_pilot_symbols(n_symbols):
     """
-    Генерация warmup-символов (OFDM символов с шумом) для настройки AGC и эквалайзера.
+    Генерация пилотных OFDM символов для настройки эквалайзера и AGC приёмника.
     
-    Создаёт n_symbols OFDM символов со случайными данными, чтобы приёмник
-    мог настроить AGC и эквалайзер до прихода реальной преамбулы.
+    Пилотный символ: все поднесущие = (1+1j)/√2 (как в преамбуле).
+    Это позволяет приёмнику:
+    1. Получить точную оценку канала Hk по 16 пилотам (вместо 2 в преамбуле)
+    2. Плавно настроить AGC на известном сигнале
+    3. Усреднить шум по 16 символам
     
     Параметры
     ----------
-    rng : np.random.RandomState
-        Генератор случайных чисел
     n_symbols : int
-        Количество warmup-символов
-    modulation : str
-        Тип модуляции ('QPSK' или 'BPSK')
+        Количество пилотных OFDM символов
     
     Возвращает
     -------
     np.ndarray
-        Сигнал warmup-символов во временной области
+        Сигнал пилотных символов во временной области
     """
     if n_symbols <= 0:
         return np.array([], dtype=np.float64)
     
-    warmup_samples = []
+    pilot_samples = []
     
-    for _ in range(n_symbols):
-        # Генерируем случайные биты для warmup-символа
-        if modulation == "BPSK":
-            # BPSK: 1 бит на поднесущую
-            bits = rng.randint(0, 2, Nsub)
-            syms = 1 - 2 * bits.astype(complex)
-        else:
-            # QPSK: 2 бита на поднесущую
-            bits = rng.randint(0, 2, Nsub * 2)
-            syms = []
-            for j in range(0, len(bits), 2):
-                b0, b1 = bits[j], bits[j+1]
-                real = 1 - 2*b0
-                imag = 1 - 2*b1
-                syms.append(complex(real, imag))
-            syms = np.array(syms) / np.sqrt(2)
-        
-        # Нормализуем к целевому RMS
-        cur_rms = np.sqrt(np.mean(np.abs(syms)**2))
-        if cur_rms > 0:
-            syms = syms / cur_rms * SYMBOL_TX_TARGET
-        
-        # Применяем фазы Schroeder (как в реальных данных)
-        if modem_config.subc_phases is not None and np.any(modem_config.subc_phases != 0):
-            syms = syms * np.exp(1j * modem_config.subc_phases)
-        
-        # IFFT для получения временного сигнала
-        X = np.zeros(Nfft, dtype=complex)
-        X[subc_inds] = syms
-        X[-subc_inds] = np.conj(syms)
-        X[0] = X[0].real
-        if Nfft % 2 == 0:
-            X[Nfft//2] = X[Nfft//2].real
-        x = np.real(np.fft.ifft(X))
+    # Пилотный символ: все поднесущие = (1+1j)/√2
+    pilot_syms = (1 + 1j) / np.sqrt(2) * np.ones(Nsub, dtype=complex)
+    
+    # Нормализуем к целевому RMS
+    cur_rms = np.sqrt(np.mean(np.abs(pilot_syms)**2))
+    if cur_rms > 0:
+        pilot_syms = pilot_syms / cur_rms * SYMBOL_TX_TARGET
+    
+    print(f"[TX-PILOT] Pilot symbol: all subcarriers = (1+1j)/√2, RMS={cur_rms:.4f}, target={SYMBOL_TX_TARGET}")
+    
+    for i in range(n_symbols):
+        # Используем ofdm_symbol() для генерации временного сигнала
+        x = ofdm_symbol(pilot_syms)
         
         # Добавляем CP
-        warmup_samples.append(np.concatenate((x[-Ncp:], x)))
+        pilot_samples.append(np.concatenate((x[-Ncp:], x)))
     
-    return np.concatenate(warmup_samples)
+    return np.concatenate(pilot_samples)
 
 
 def _transmit_data(data_bytes, total_data_len, filename_bytes, mode='T', packet_blocks=DEFAULT_PACKET_BLOCKS):
@@ -438,17 +416,18 @@ def _transmit_data(data_bytes, total_data_len, filename_bytes, mode='T', packet_
         n_logical_sent = n_physical_now // modem_config.OFDM_SYMBOLS_PER_BLOCK
         print(f"[TX-DBG] packet_no={packet_no} is_first={is_first} payload_bytes={best_sz} physical_symbols={n_physical_now} logical_blocks={n_logical_sent} header_first16={header_bytes[:16].hex()}")
 
-        # Добавляем warmup-символы перед преамбулой первого пакета
+        # Добавляем пилотные символы перед преамбулой первого пакета
         # для настройки AGC и эквалайзера приёмника
-        if is_first and WARMUP_SYMBOLS > 0:
-            warmup = _generate_warmup_symbols(rng_global, WARMUP_SYMBOLS, modem_config.MODULATION)
-            print(f"[TX] Warmup: {WARMUP_SYMBOLS} OFDM symbols ({len(warmup)} samples) before preamble")
+        # Пилотные символы дают точную оценку канала Hk и плавную настройку AGC
+        if is_first and PREAMBLE_PILOT_SYMBOLS > 0:
+            pilot = _generate_pilot_symbols(PREAMBLE_PILOT_SYMBOLS)
+            print(f"[TX] Pilot: {PREAMBLE_PILOT_SYMBOLS} OFDM symbols ({len(pilot)} samples) before preamble")
         else:
-            warmup = np.array([], dtype=np.float64)
+            pilot = np.array([], dtype=np.float64)
 
         preamble = build_preamble()
-        packet_samples = np.concatenate((warmup, preamble, td_now)) if len(td_now) > 0 else np.concatenate((warmup, preamble))
-        packet_preamble_offsets_no_preroll.append(running_sample_offset + len(warmup))
+        packet_samples = np.concatenate((pilot, preamble, td_now)) if len(td_now) > 0 else np.concatenate((pilot, preamble))
+        packet_preamble_offsets_no_preroll.append(running_sample_offset + len(pilot))
 
         def make_gap_noise(n_samps):
             if NOISE_LEVEL is None or NOISE_LEVEL <= 0:
