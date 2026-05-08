@@ -496,6 +496,12 @@ class AdaptiveEqualizer:
     Особенность: после каждого обновления Hk нормализуется для сохранения
     среднего гейна постоянным. Это предотвращает деградацию сигнала в
     идеальных каналах (loopback) и обеспечивает стабильную работу AGC.
+    
+    Режимы работы:
+    - process(): стандартный DD-режим (применяет Hk + обновляет по решению)
+    - apply_only(): только применяет Hk без обновления (для символов данных)
+    - update_from_pilot(): обновляет Hk по известному пилотному эталону
+      (для пилотных символов, вставленных в поток данных)
     """
     
     def __init__(self, initial_Hk, alpha=0.05, modulation='QPSK', store_history=True, history_step=1):
@@ -545,6 +551,7 @@ class AdaptiveEqualizer:
     def process(self, rx_fd):
         """
         Обработка одного принятого OFDM символа (в частотной области).
+        Стандартный DD-режим: применяет Hk + обновляет по решению.
         
         :param rx_fd: Комплексный массив поднесущих принятого символа (после FFT).
         :return: Выровненный символ (x_hat).
@@ -586,12 +593,43 @@ class AdaptiveEqualizer:
         # Сохраняем историю с заданным шагом
         if self.store_history and (self.symbol_count % self.history_step == 0 or self.symbol_count == 1):
             self.history.append(self.Hk.copy())
-            # if self.symbol_count % 100 == 0:
-            #     avg_mag = np.mean(np.abs(self.Hk))
-            #     print(f"[EQ-DEBUG] Сохранено {len(self.history)} состояний Hk (символ {self.symbol_count}), "
-            #           f"|Hk|_avg={avg_mag:.4f}")
         
         return x_hat
+    
+    def apply_only(self, rx_fd):
+        """
+        Применение текущего Hk без обновления (для символов данных).
+        
+        В отличие от process(), этот метод НЕ обновляет коэффициенты Hk.
+        Используется на символах данных между пилотами, где мы не знаем эталон.
+        
+        :param rx_fd: Комплексный массив поднесущих принятого символа (после FFT).
+        :return: Выровненный символ (x_hat).
+        """
+        x_hat = rx_fd / (self.Hk + 1e-12)
+        self.symbol_count += 1
+        return x_hat
+    
+    def update_from_pilot(self, rx_fd, pilot_ref):
+        """
+        Обновление Hk по известному пилотному эталону (для пилотных символов).
+        
+        Эквалайзер подстраивает Hk ТОЛЬКО на пилотных символах, где известен
+        эталонный сигнал. На обычных символах данных используется apply_only().
+        
+        :param rx_fd: Комплексный массив поднесущих принятого символа (после FFT).
+        :param pilot_ref: Эталонные поднесущие пилотного символа (что было передано).
+        """
+        # Оценка канала: H_new = Y / X_ref
+        Hk_new = rx_fd / (pilot_ref + 1e-12)
+        
+        # Экспоненциальное скользящее среднее для сглаживания
+        self.Hk = (1.0 - self.alpha) * self.Hk + self.alpha * Hk_new
+        
+        # Нормализация Hk для сохранения среднего гейна
+        self._normalize_Hk()
+        
+        self.symbol_count += 1
     
     def get_current_Hk(self):
         """Возвращает текущую оценку канала Hk."""

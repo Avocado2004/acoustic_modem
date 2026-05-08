@@ -141,8 +141,12 @@ def parse_header(header64: bytes):
 def simulate_packet_positions(total_data_len_bytes, filename_bytes, mode_is_text, packet_blocks_local,
                               preamble_len, symbol_len, gap_samples):
     """
-    Симуляция позиций пакетов для передачи.
-    Возвращает список смещений (в отсчетах) для каждого пакета.
+    Симуляция позиций преамбул пакетов для передачи.
+    Возвращает список смещений ПРЕАМБУЛ (в отсчетах) для каждого пакета.
+    
+    ВАЖНО: позиции — это позиции начала преамбулы (ZC1), а не начала пакета.
+    Это согласовано с modem_tx.py, где:
+      packet_preamble_offsets_no_preroll.append(running_sample_offset + len(pilot))
     
     packet_blocks_local - количество ЛОГИЧЕСКИХ блоков в пакете.
     """
@@ -190,25 +194,38 @@ def simulate_packet_positions(total_data_len_bytes, filename_bytes, mode_is_text
     single_hdr = build_header(b'T' if mode_is_text else b'F', total_data_len_bytes, filename_bytes=filename_bytes, packet_no=0, version=0, packet_blocks=packet_blocks_local)
     hdr_first = single_hdr + single_hdr + single_hdr
     remaining = total_data_len_bytes
+    # offset — это начало текущего пакета (до пилотов для pkt0, до преамбулы для остальных)
     offset = 0
     pkt_no = 0
 
+    # === Первый пакет ===
     best_first = max_payload_for_header(hdr_first)
     payload = min(remaining, best_first)
     td, n_physical_symbols = bytes_to_ofdm_blocks_bytes(hdr_first + (b'\x00' * payload))
-    # Используем физические символы для расчета сэмплов
-    packet_samples = preamble_len + n_physical_symbols * symbol_len + gap_samples
-    positions.append(offset)
+    # Учитываем пилоты внутри данных для расчета сэмплов
+    n_pilots = n_physical_symbols // modem_config.PILOT_INTERVAL if modem_config.PILOT_INTERVAL > 0 else 0
+    total_symbols = n_physical_symbols + n_pilots
+    # Пилоты перед преамбулой добавляются только к первому пакету (как в modem_tx.py)
+    preamble_pilot_samples = modem_config.PREAMBLE_PILOT_SYMBOLS * symbol_len
+    packet_samples = preamble_pilot_samples + preamble_len + total_symbols * symbol_len + gap_samples
+    # Позиция преамбулы = offset + preamble_pilot_samples (пилоты идут ДО преамбулы)
+    positions.append(offset + preamble_pilot_samples)
     offset += packet_samples
     remaining -= payload
     pkt_no += 1
 
+    # === Последующие пакеты ===
     while remaining > 0:
         hdr = make_packet_header_bytes(pkt_no, tx_type_bits)
         best = max_payload_for_header(hdr)
         payload = min(remaining, best)
         td, n_physical_symbols = bytes_to_ofdm_blocks_bytes(hdr + (b'\x00' * payload))
-        packet_samples = preamble_len + n_physical_symbols * symbol_len + gap_samples
+        # Учитываем пилоты внутри данных
+        n_pilots = n_physical_symbols // modem_config.PILOT_INTERVAL if modem_config.PILOT_INTERVAL > 0 else 0
+        total_symbols = n_physical_symbols + n_pilots
+        # Для последующих пакетов пилоты перед преамбулой НЕ добавляются
+        # Позиция преамбулы = offset (начало пакета = начало преамбулы)
+        packet_samples = preamble_len + total_symbols * symbol_len + gap_samples
         positions.append(offset)
         offset += packet_samples
         remaining -= payload

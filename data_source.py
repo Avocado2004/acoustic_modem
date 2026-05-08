@@ -182,13 +182,22 @@ class FileDataSource(DataSource):
         self.current_pos = min(self.current_pos + CHUNK_SIZE, self.total_samples)
         snapshot = self.data[:self.current_pos].copy()
 
-        print(f"[FileDataSource] read_snapshot: pos={self.current_pos}/{self.total_samples}")
+        # Отладочный вывод: проверяем сигнал в позиции 10720
+        if self.current_pos > 10720:
+            sig_10720 = np.sqrt(np.mean(self.data[10720:11720]**2))
+        else:
+            sig_10720 = 0
+        print(f"[FileDataSource] read_snapshot: pos={self.current_pos}/{self.total_samples} sig_10720_rms={sig_10720:.6f}")
         return snapshot
 
     def wait_for_samples(self, needed: int, timeout: float = 10.0) -> bool:
         """
-        Для файла — имитирует ожидание, увеличивая позицию.
-        Работает очень быстро, так как файл уже загружен в памяти.
+        Для файла — продвигает current_pos до needed (но не уменьшает).
+
+        Файл полностью загружен в память в конструкторе, поэтому
+        позиция продвигается мгновенно. Позиция НЕ уменьшается —
+        это критически важно для корректного декодирования пакетов
+        после первого.
 
         Parameters
         ----------
@@ -206,13 +215,13 @@ class FileDataSource(DataSource):
             print(f"[FileDataSource] wait_for_samples: needed={needed} <= 0, returning True")
             return True
 
-        # Если файл уже дочитан до конца — сразу возвращаем False
-        if self.current_pos >= self.total_samples:
-            print(f"[FileDataSource] wait_for_samples: file already exhausted "
-                  f"(pos={self.current_pos}, total={self.total_samples}), returning False")
-            return False
+        # Если уже достаточно данных — сразу True
+        if self.current_pos >= needed:
+            print(f"[FileDataSource] wait_for_samples: already have enough "
+                  f"(pos={self.current_pos} >= needed={needed}), returning True")
+            return True
 
-        # Устанавливаем позицию на нужное количество сэмплов
+        # Продвигаем current_pos до needed (НЕ уменьшаем!)
         old_pos = self.current_pos
         self.current_pos = min(needed, self.total_samples)
 

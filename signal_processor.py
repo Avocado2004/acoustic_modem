@@ -89,15 +89,11 @@ def _normalized_correlation(buf, preamble_td_local):
     # Корреляция через fftconvolve (быстрее np.correlate для длинных буферов)
     corr = fftconvolve(buf, preamble_td_local[::-1], mode='valid')
 
-    # Энергия скользящего окна
-    energy = np.convolve(buf * buf, np.ones(pre_len)[::-1], mode='valid')
-
-    # Нормализация
-    denom = np.sqrt(energy * pre_energy)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        norm_corr = np.abs(corr) / denom
-        norm_corr[~np.isfinite(norm_corr)] = 0.0
-
+    # Нормализация только по энергии преамбулы
+    # НЕ нормализуем по энергии скользящего окна, потому что это искажает
+    # результат в областях с переменной энергией (preroll + пилоты)
+    norm_corr = np.abs(corr) / np.sqrt(pre_energy)
+    
     return norm_corr
 
 
@@ -140,6 +136,58 @@ def _refine_sync(buf, center, preamble_td_local):
     peak_val = float(norm_local[loc_peak])
     refined_abs = center + loc_peak
 
+    return refined_abs, peak_val
+
+
+def _find_preamble_near_expected(buf, expected_pos, preamble_td_local, search_radius=None):
+    """
+    Поиск преамбулы в окне вокруг ожидаемой позиции.
+
+    В отличие от _refine_sync (которая ищет от левого края окна),
+    эта функция центрирует окно на ожидаемой позиции и ищет
+    ближайший пик корреляции.
+
+    Параметры
+    ----------
+    buf : np.ndarray
+        Буфер сигнала
+    expected_pos : int
+        Ожидаемая позиция преамбулы
+    preamble_td_local : np.ndarray
+        Временное представление преамбулы
+    search_radius : int, optional
+        Радиус поиска вокруг expected_pos (по умолчанию 5*SYMBOL_LEN)
+
+    Возвращает
+    -------
+    refined_abs : int
+        Уточнённая абсолютная позиция преамбулы
+    peak_val : float
+        Значение корреляции в найденном пике
+    """
+    pre_len = len(preamble_td_local)
+    
+    if search_radius is None:
+        search_radius = 5 * SYMBOL_LEN  # Достаточно широкое окно для поиска
+    
+    # Окно поиска центрировано на expected_pos
+    window_start = max(0, expected_pos - search_radius)
+    window_end = expected_pos + search_radius + pre_len
+    
+    if window_end > buf.size:
+        print(f"[SP-FIND-PRE] buffer too short ({buf.size}) for window [{window_start}:{window_end}]")
+        return expected_pos, 0.0
+    
+    local_segment = buf[window_start:window_end]
+    norm_local = _normalized_correlation(local_segment, preamble_td_local)
+    
+    loc_peak = int(np.argmax(norm_local))
+    peak_val = float(norm_local[loc_peak])
+    refined_abs = window_start + loc_peak
+    
+    print(f"[SP-FIND-PRE] expected={expected_pos}, window=[{window_start}:{window_end}], "
+          f"peak_at={refined_abs} (delta={refined_abs - expected_pos}), peak_val={peak_val:.4f}")
+    
     return refined_abs, peak_val
 
 
@@ -380,10 +428,22 @@ def _process_legacy_interface(data_source, preamble_td_local, config, pre_len, s
             stuck_count_legacy = 0
         prev_buf_size_legacy = buf.size
 
-        if buf.size < pre_len:
+        # Минимальный размер буфера для корректного поиска преамбулы
+        # Структура сигнала: preroll + пилоты + преамбула + данные
+        # Корреляция имеет размер buf.size - pre_len + 1
+        # Чтобы найти преамбулу на позиции (preroll + pilot_samples), нужно:
+        #   buf.size - pre_len + 1 > preroll + pilot_samples
+        #   buf.size > preroll + pilot_samples + pre_len - 1
+        # Для второго прохода (refine) нужно дополнительно:
+        #   buf.size > preroll + pilot_samples + pre_len + 2*SYMBOL_LEN
+        # Итого: buf.size = preroll + pilot_samples + pre_len + 3*SYMBOL_LEN
+        preroll_samples = int(0.25 * modem_config.fs)  # 0.25 секунды preroll = 12000
+        pilot_samples = modem_config.PREAMBLE_PILOT_SYMBOLS * SYMBOL_LEN  # 16 * 640 = 10240
+        min_buf_size = preroll_samples + pilot_samples + pre_len + 3 * SYMBOL_LEN
+        if buf.size < min_buf_size:
             if search_iteration % 50 == 0:
                 print(f"[SP-SEARCH] iteration {search_iteration}, "
-                      f"buf.size={buf.size} < pre_len={pre_len}")
+                      f"buf.size={buf.size} < min_buf_size={min_buf_size}")
             time.sleep(sleep_time)
             continue
 
@@ -392,17 +452,52 @@ def _process_legacy_interface(data_source, preamble_td_local, config, pre_len, s
         peak_idx = int(np.argmax(norm_corr))
         peak_val = float(norm_corr[peak_idx])
 
+        # Отладочный вывод
+        if peak_val > 0.1:
+            print(f"[SP-SEARCH-DEBUG] iteration {search_iteration}, peak_idx={peak_idx}, peak_val={peak_val:.4f}, "
+                  f"buf.size={buf.size}")
+
         if search_iteration % 20 == 0 or peak_val > PREAMBLE_CORR_THRESHOLD * 0.8:
             print(f"[SP-SEARCH] iteration {search_iteration}, "
                   f"peak_idx={peak_idx}, peak_val={peak_val:.4f}, "
                   f"threshold={PREAMBLE_CORR_THRESHOLD}, buf.size={buf.size}")
 
-        if peak_val < PREAMBLE_CORR_THRESHOLD:
+        # Динамический порог: корреляция должна быть значительно выше среднего уровня
+        # Это позволяет находить преамбулу при любой громкости и шуме
+        mean_corr = np.mean(norm_corr) if len(norm_corr) > 0 else 0
+        dynamic_threshold = max(PREAMBLE_CORR_THRESHOLD, mean_corr * 3.0)
+        
+        if peak_val < dynamic_threshold:
             time.sleep(sleep_time)
             continue
 
-        # Найден кандидат — уточняем синхронизацию
+        # Проверяем, что энергия в окне корреляции соответствует энергии преамбулы
+        # Это позволяет отличить реальную преамбулу от пилотов
+        # (пилоты имеют ту же структуру, но другую энергию)
+        window_energy = np.sum(buf[peak_idx:peak_idx+pre_len]**2) if peak_idx + pre_len <= buf.size else 0
+        expected_energy = np.sum(preamble_td_local ** 2)  # Ожидаемая энергия = энергия преамбулы
+        
+        # Энергия в окне должна быть близка к ожидаемой энергии преамбулы
+        # (с учётом возможных искажений)
+        energy_ratio = window_energy / expected_energy if expected_energy > 0 else 0
+        
+        # Отладочный вывод
+        print(f"[SP-SEARCH-ENERGY] peak_idx={peak_idx}, window_energy={window_energy:.2f}, expected_energy={expected_energy:.2f}, ratio={energy_ratio:.2f}")
+        
+        # Если энергия в окне слишком низкая или слишком высокая — это ложный пик
+        if energy_ratio < 0.5 or energy_ratio > 2.0:
+            print(f"[SP-SEARCH] peak at {peak_idx} has invalid energy ratio ({energy_ratio:.2f}), skipping")
+            time.sleep(sleep_time)
+            continue
+
+        # Найден кандидат — проверяем что пилоты перед преамбулой помещаются в буфер
         cand_abs = peak_idx
+        preamble_pilot_samples_legacy = modem_config.PREAMBLE_PILOT_SYMBOLS * SYMBOL_LEN
+        if cand_abs < preamble_pilot_samples_legacy:
+            print(f"[SP-SEARCH] candidate at {cand_abs} too close to buffer start, skip")
+            time.sleep(sleep_time)
+            continue
+
         print(f"[SP-SEARCH] candidate found at {cand_abs}, peak_val={peak_val:.4f}")
 
         # Двухпроходная синхронизация: уточнение в окне ±SYMBOL_LEN
@@ -422,13 +517,27 @@ def _process_legacy_interface(data_source, preamble_td_local, config, pre_len, s
         print(f"[SP-SEARCH] refined: cand={cand_abs} -> refined={refined_abs}, "
               f"refined_peak={refined_peak:.4f}")
 
+        # Проверяем что пилоты перед преамбулой помещаются в буфер после уточнения
+        if refined_abs < preamble_pilot_samples_legacy:
+            print(f"[SP-SEARCH] refined at {refined_abs} too close to buffer start, skip")
+            time.sleep(sleep_time)
+            continue
+
         # Проверяем, достаточно ли данных для декодирования первого пакета
         packet_blocks_guess = DEFAULT_PACKET_BLOCKS
         # Для QPSK: OFDM_SYMBOLS_PER_BLOCK=1, для BPSK: OFDM_SYMBOLS_PER_BLOCK=2
         # Используем максимальное значение (BPSK) чтобы гарантировать достаточно данных
         # для любой модуляции (модуляция определится после декодирования первого пакета)
-        physical_symbols_guess = packet_blocks_guess * 2  # максимум для BPSK
-        needed_total = refined_abs + pre_len + physical_symbols_guess * SYMBOL_LEN + SYMBOL_LEN
+        physical_symbols_guess = packet_blocks_guess * 2  # максимум для BPSK (данные)
+        # Учитываем пилоты внутри данных: каждый PILOT_INTERVAL символов вставляется пилот
+        # Для BPSK: 150 данных + 150//10 = 15 пилотов = 165 символов
+        pilot_symbols_guess = physical_symbols_guess // modem_config.PILOT_INTERVAL if modem_config.PILOT_INTERVAL > 0 else 0
+        total_symbols_with_pilots = physical_symbols_guess + pilot_symbols_guess
+        # Добавляем запас для пилотов перед преамбулой (PREAMBLE_PILOT_SYMBOLS)
+        # и для самой преамбулы (pre_len)
+        preamble_pilot_samples = modem_config.PREAMBLE_PILOT_SYMBOLS * SYMBOL_LEN
+        needed_total = (refined_abs + preamble_pilot_samples + pre_len +
+                        total_symbols_with_pilots * SYMBOL_LEN + SYMBOL_LEN)
 
         print(f"[SP-SEARCH] refined_abs={refined_abs}, needed_total={needed_total}, "
               f"packet_blocks_guess={packet_blocks_guess}, "
@@ -551,7 +660,18 @@ def _process_legacy_interface(data_source, preamble_td_local, config, pre_len, s
     print(f"[SP] Expected {len(positions_no_preroll)} packets at positions: "
           f"{positions_no_preroll[:5]}{'...' if len(positions_no_preroll) > 5 else ''}")
 
-    # Вычисляем абсолютные позиции
+    # Вычисляем абсолютные позиции преамбул
+    # positions_no_preroll содержит позиции ПРЕАМБУЛ каждого пакета относительно начала пакетов (без preroll)
+    # Это согласовано с modem_tx.py: packet_preamble_offsets_no_preroll.append(running_sample_offset + len(pilot))
+    #
+    # Правильная формула: expected_abs[i] = base_abs + positions_no_preroll[i]
+    # где base_abs = first_sync_abs - positions_no_preroll[0]
+    #
+    # Это корректно, потому что:
+    # - positions_no_preroll[0] = pilot_samples (позиция преамбулы пакета 0 после пилотов)
+    # - positions_no_preroll[i] = позиция преамбулы пакета i относительно начала пакетов
+    # - preroll добавляется только к первому пакету, поэтому позиции последующих пакетов
+    #   уже корректно вычислены относительно конца предыдущего пакета
     base_abs = first_sync_abs - positions_no_preroll[0]
     expected_abs = [base_abs + int(x) for x in positions_no_preroll]
 
@@ -574,15 +694,24 @@ def _process_legacy_interface(data_source, preamble_td_local, config, pre_len, s
             print(f"[SP-PKT{pkt_idx}] reused: pref={pref}, used_pre={used_preamble}, "
                   f"RS_OK={rs_ok_count}, bytes={len(decoded_bytes)}")
         else:
-            # Вычисляем сколько данных нужно для этого пакета
-            pref_backoff = max(0, pref - SYMBOL_LEN)
+            # Вычисляем сколько данных нужно для полного декодирования этого пакета:
+            # позиция преамбулы + длина преамбулы + все данные пакета + запас
+            # Для последующих пакетов пилотов перед преамбулой нет
             physical_symbols_val = packet_blocks_val * modem_config.OFDM_SYMBOLS_PER_BLOCK
-            needed_for_pkt = (pref_backoff + SYMBOL_LEN + pre_len +
-                              physical_symbols_val * SYMBOL_LEN + SYMBOL_LEN)
+            # Учитываем пилоты внутри данных
+            pilot_symbols_val = physical_symbols_val // modem_config.PILOT_INTERVAL if modem_config.PILOT_INTERVAL > 0 else 0
+            total_symbols_val = physical_symbols_val + pilot_symbols_val
+            # Размер пакета: преамбула + данные (с пилотами) + зазор
+            packet_samples = pre_len + total_symbols_val * SYMBOL_LEN + SYMBOL_LEN  # SYMBOL_LEN как зазор
+            needed_for_full_packet = pref + packet_samples
 
-            # Ждём достаточно данных
-            if not data_source.wait_for_samples(needed_for_pkt, timeout=20.0):
-                print(f"[SP-PKT{pkt_idx}] timeout waiting for {needed_for_pkt} samples, aborting")
+            print(f"[SP-PKT{pkt_idx}] need {needed_for_full_packet} samples for full packet "
+                  f"(pref={pref}, packet_samples={packet_samples}, "
+                  f"physical_symbols={physical_symbols_val}, pilots={pilot_symbols_val})")
+
+            # Ждём, пока буфер содержит достаточно данных для всего пакета
+            if not data_source.wait_for_samples(needed_for_full_packet, timeout=20.0):
+                print(f"[SP-PKT{pkt_idx}] timeout waiting for {needed_for_full_packet} samples, aborting")
                 break
 
             buf_now = data_source.read_snapshot()
@@ -591,17 +720,12 @@ def _process_legacy_interface(data_source, preamble_td_local, config, pre_len, s
             _rx_st.rx = buf_now.copy()
             _rx_st.abs_corr = np.abs(fftconvolve(buf_now, preamble_td_local[::-1], mode='valid'))
 
-            # Уточняем синхронизацию
-            refine_center = pref_backoff
-            if refine_center + pre_len + 2 * SYMBOL_LEN > buf_now.size:
-                if not data_source.wait_for_samples(refine_center + pre_len + 2 * SYMBOL_LEN, timeout=5.0):
-                    print(f"[SP-PKT{pkt_idx}] not enough samples for refine, abort")
-                    break
-                buf_now = data_source.read_snapshot()
-                _rx_st.rx = buf_now.copy()
-                _rx_st.abs_corr = np.abs(fftconvolve(buf_now, preamble_td_local[::-1], mode='valid'))
-
-            refined_abs, refined_peak = _refine_sync(buf_now, refine_center, preamble_td_local)
+            # Уточняем синхронизацию — ищем преамбулу в широком окне вокруг ожидаемой позиции
+            # Окно не менее 3200 сэмплов для надёжного поиска
+            search_radius = max(5 * SYMBOL_LEN, 3200)  # Минимум 3200 сэмплов
+            refined_abs, refined_peak = _find_preamble_near_expected(
+                buf_now, pref, preamble_td_local, search_radius=search_radius
+            )
             print(f"[SP-PKT{pkt_idx}] refine: pref={pref} -> refined={refined_abs}, "
                   f"peak={refined_peak:.4f}")
 
@@ -785,8 +909,14 @@ def _process_chunk_interface(data_source, preamble_td_local, config, pre_len, sl
             time.sleep(sleep_time)
             continue
 
-        # Найден кандидат — уточняем синхронизацию
+        # Найден кандидат — проверяем что пилоты перед преамбулой помещаются в буфер
         cand_abs = peak_idx
+        preamble_pilot_samples_chunk = modem_config.PREAMBLE_PILOT_SYMBOLS * SYMBOL_LEN
+        if cand_abs < preamble_pilot_samples_chunk:
+            print(f"[SP-SEARCH] candidate at {cand_abs} too close to buffer start, skip")
+            time.sleep(sleep_time)
+            continue
+
         print(f"[SP-SEARCH] candidate found at {cand_abs}, peak_val={peak_val:.4f}")
 
         # Двухпроходная синхронизация
@@ -811,13 +941,25 @@ def _process_chunk_interface(data_source, preamble_td_local, config, pre_len, sl
         print(f"[SP-SEARCH] refined: cand={cand_abs} -> refined={refined_abs}, "
               f"refined_peak={refined_peak:.4f}")
 
+        # Проверяем что пилоты перед преамбулой помещаются в буфер после уточнения
+        if refined_abs < preamble_pilot_samples_chunk:
+            print(f"[SP-SEARCH] refined at {refined_abs} too close to buffer start, skip")
+            time.sleep(sleep_time)
+            continue
+
         # Проверяем, достаточно ли данных для декодирования
         packet_blocks_guess = DEFAULT_PACKET_BLOCKS
         # Для QPSK: OFDM_SYMBOLS_PER_BLOCK=1, для BPSK: OFDM_SYMBOLS_PER_BLOCK=2
         # Используем максимальное значение (BPSK) чтобы гарантировать достаточно данных
         # для любой модуляции (модуляция определится после декодирования первого пакета)
-        physical_symbols_guess = packet_blocks_guess * 2  # максимум для BPSK
-        needed_total = refined_abs + pre_len + physical_symbols_guess * SYMBOL_LEN + SYMBOL_LEN
+        physical_symbols_guess = packet_blocks_guess * 2  # максимум для BPSK (данные)
+        # Учитываем пилоты внутри данных
+        pilot_symbols_guess = physical_symbols_guess // modem_config.PILOT_INTERVAL if modem_config.PILOT_INTERVAL > 0 else 0
+        total_symbols_with_pilots = physical_symbols_guess + pilot_symbols_guess
+        # Добавляем запас для пилотов перед преамбулой
+        preamble_pilot_samples = modem_config.PREAMBLE_PILOT_SYMBOLS * SYMBOL_LEN
+        needed_total = (refined_abs + preamble_pilot_samples + pre_len +
+                        total_symbols_with_pilots * SYMBOL_LEN + SYMBOL_LEN)
 
         print(f"[SP-SEARCH] refined_abs={refined_abs}, needed_total={needed_total}, "
               f"packet_blocks_guess={packet_blocks_guess}, "
@@ -982,8 +1124,13 @@ def _process_chunk_interface(data_source, preamble_td_local, config, pre_len, sl
             # Вычисляем сколько данных нужно для этого пакета
             pref_backoff = max(0, pref - SYMBOL_LEN)
             physical_symbols_val = packet_blocks_val * modem_config.OFDM_SYMBOLS_PER_BLOCK
-            needed_for_pkt = (pref_backoff + SYMBOL_LEN + pre_len +
-                              physical_symbols_val * SYMBOL_LEN + SYMBOL_LEN)
+            # Учитываем пилоты внутри данных
+            pilot_symbols_val = physical_symbols_val // modem_config.PILOT_INTERVAL if modem_config.PILOT_INTERVAL > 0 else 0
+            total_symbols_val = physical_symbols_val + pilot_symbols_val
+            # Добавляем запас для пилотов перед преамбулой
+            preamble_pilot_samples = modem_config.PREAMBLE_PILOT_SYMBOLS * SYMBOL_LEN
+            needed_for_pkt = (pref_backoff + preamble_pilot_samples + SYMBOL_LEN + pre_len +
+                              total_symbols_val * SYMBOL_LEN + SYMBOL_LEN)
 
             # Накопляем данные если нужно
             if total_samples < needed_for_pkt:
@@ -1003,23 +1150,12 @@ def _process_chunk_interface(data_source, preamble_td_local, config, pre_len, sl
             _rx_st.rx = buf_now.copy()
             _rx_st.abs_corr = np.abs(fftconvolve(buf_now, preamble_td_local[::-1], mode='valid'))
 
-            # Уточняем синхронизацию
-            refine_center = pref_backoff
-            refine_window_len = pre_len + 2 * SYMBOL_LEN
-
-            if refine_center + refine_window_len > total_samples:
-                total_samples, success = _accumulate_buffer(
-                    data_source, ring_buffer, total_samples,
-                    refine_center + refine_window_len, sleep_time, f"refine{pkt_idx}"
-                )
-                if not success:
-                    print(f"[SP-PKT{pkt_idx}] not enough samples for refine, abort")
-                    break
-                buf_now = _buffer_to_array(ring_buffer, total_samples)
-                _rx_st.rx = buf_now.copy()
-                _rx_st.abs_corr = np.abs(fftconvolve(buf_now, preamble_td_local[::-1], mode='valid'))
-
-            refined_abs, refined_peak = _refine_sync(buf_now, refine_center, preamble_td_local)
+            # Уточняем синхронизацию — ищем преамбулу в широком окне вокруг ожидаемой позиции
+            # Окно не менее 3200 сэмплов для надёжного поиска
+            search_radius = max(5 * SYMBOL_LEN, 3200)
+            refined_abs, refined_peak = _find_preamble_near_expected(
+                buf_now, pref, preamble_td_local, search_radius=search_radius
+            )
             print(f"[SP-PKT{pkt_idx}] refine: pref={pref} -> refined={refined_abs}, "
                   f"peak={refined_peak:.4f}")
 

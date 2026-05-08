@@ -10,7 +10,7 @@ from modem_config import (Nfft, Ncp, Nsub, subc_inds, fs, SYMBOL_LEN, DEFAULT_PA
                            RS_CW_BITS, RS_DATA_BYTES,
                            RS_CW_BYTES, rs, SYMBOL_TARGET_RMS, AGC_ALPHA, AGC_DEBUG, MIN_RMS,
                            PLOTTING_AVAILABLE, _MAX_RS_FAIL_PRINTS_GLOBAL, SYNC_WINDOW_HALF,
-                           PREAMBLE_PILOT_SYMBOLS)
+                           PREAMBLE_PILOT_SYMBOLS, PILOT_INTERVAL)
 
 from modem_modulation import (qpsk_demap, bpsk_demap, ofdm_symbol, build_preamble, bytes_to_bits, bits_to_bytes,
                            sync_by_corr, deinterleave_bits, AdaptiveEqualizer)
@@ -44,12 +44,15 @@ assert hasattr(_rx_st, 'rx_constellation_symbols'), "rx_state должен со�
 # -----------------------
 # Функция извлечения пилотных символов для настройки эквалайзера и AGC
 # -----------------------
-def _extract_pilot_symbols(pref_abs, f_err_loc):
+def _extract_pilot_symbols(pref_abs, f_err_loc, packet_idx=0):
     """
     Извлечение и усреднение пилотных символов перед преамбулой.
     
     Пилотные символы идут ДО преамбулы (ZC+ZC+P+P) и содержат известные данные:
     все поднесущие = (1+1j)/√2.
+    
+    ВАЖНО: пилоты перед преамбулой существуют ТОЛЬКО для пакета 0.
+    Для последующих пакетов (packet_idx > 0) пилотов нет, функция вернёт (None, None).
     
     Это позволяет:
     1. Получить точную оценку канала Hk по 16 пилотам (вместо 2 в преамбуле)
@@ -61,6 +64,8 @@ def _extract_pilot_symbols(pref_abs, f_err_loc):
         Абсолютная позиция начала преамбулы (ZC1)
     f_err_loc : float
         Локальная частотная ошибка для компенсации
+    packet_idx : int
+        Номер пакета (0 для первого пакета, >0 для последующих)
     
     Возвращает
     -------
@@ -70,7 +75,10 @@ def _extract_pilot_symbols(pref_abs, f_err_loc):
     """
     n_pilots = PREAMBLE_PILOT_SYMBOLS
     
-    if n_pilots <= 0:
+    # Пилоты перед преамбулой существуют ТОЛЬКО для первого пакета
+    if n_pilots <= 0 or packet_idx > 0:
+        if packet_idx > 0:
+            print(f"[RX-PILOT] packet_idx={packet_idx} > 0, skipping pilot extraction (no pilots before preamble)")
         return None, None
     
     # Позиция пилотов: перед преамбулой
@@ -79,6 +87,22 @@ def _extract_pilot_symbols(pref_abs, f_err_loc):
     if pilot_start < 0:
         print(f"[RX-PILOT] pilot_start={pilot_start} < 0, skipping pilot extraction")
         return None, None
+    
+    # Отладочный вывод: проверяем сигнал в буфере
+    # Проверяем сигнал в разных позициях буфера
+    buf_size = _rx_st.rx.size
+    # Начало буфера (preroll)
+    start_rms = np.sqrt(np.mean(_rx_st.rx[0:min(1000, buf_size)]**2)) if buf_size > 0 else 0
+    # Позиция 12000 (ожидаемое начало пилотов после preroll)
+    pos_12000_rms = np.sqrt(np.mean(_rx_st.rx[12000:13000]**2)) if buf_size > 13000 else 0
+    # Позиция 22240 (ожидаемое начало преамбулы)
+    pos_22240_rms = np.sqrt(np.mean(_rx_st.rx[22240:23240]**2)) if buf_size > 23240 else 0
+    # Текущая позиция пилотов
+    pilot_rms = np.sqrt(np.mean(_rx_st.rx[pilot_start:pilot_start + n_pilots * SYMBOL_LEN]**2)) if pilot_start + n_pilots * SYMBOL_LEN < buf_size else 0
+    
+    print(f"[RX-BUF-DEBUG] buf_size={buf_size} start_rms={start_rms:.6f} "
+          f"pos_12000_rms={pos_12000_rms:.6f} pos_22240_rms={pos_22240_rms:.6f} "
+          f"pilot_rms={pilot_rms:.6f} pref_abs={pref_abs}")
     
     # Эталонный пилотный символ: все поднесущие = (1+1j)/√2
     S_pilot_ref = (1 + 1j) / np.sqrt(2) * np.ones(Nsub, dtype=complex)
@@ -108,15 +132,22 @@ def _extract_pilot_symbols(pref_abs, f_err_loc):
         time_vec = np.arange(Nfft) / float(fs)
         useful_corr = useful * np.exp(-1j * 2.0 * np.pi * f_err_loc * (t_sym_start + time_vec))
         
-        # FFT → получаем принятые поднесущие
+        # FFT -> получаем принятые поднесущие
         R = np.fft.fft(useful_corr) / Nfft
         
         # Оценка канала для этого символа: Hk_i = R / S_ref
         Hk_i = R[subc_inds] / S_pilot_ref
         
         Hk_sum += Hk_i
-        pilot_rms_sum += np.sqrt(np.mean(np.abs(useful)**2))
+        cur_rms = np.sqrt(np.mean(np.abs(useful)**2))
+        pilot_rms_sum += cur_rms
         valid_pilots += 1
+        
+        # Отладочный вывод для первых 3 пилотов
+        if i < 3:
+            print(f"[RX-PILOT-{i}] sym_start={sym_start} useful_rms={cur_rms:.6f} "
+                  f"useful_min={np.min(np.abs(useful)):.6f} useful_max={np.max(np.abs(useful)):.6f} "
+                  f"Hk_avg_mag={np.mean(np.abs(Hk_i)):.4f}")
     
     if valid_pilots == 0:
         print("[RX-PILOT] no valid pilots extracted")
@@ -211,10 +242,11 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         print(f"[EQ-INIT] R1t[subc] rms={np.sqrt(np.mean(np.abs(R1t[subc_inds])**2)):.6f}, S_ref[subc] rms={np.sqrt(np.mean(np.abs(S_ref[subc_inds])**2)):.6f}")
         
         # Пытаемся использовать пилотные символы для более точной оценки канала
+        # Пилоты существуют только для первого пакета (packet_idx == 0)
         Hk_pilot = None
         pilot_rms = None
         if PREAMBLE_PILOT_SYMBOLS > 0:
-            Hk_pilot, pilot_rms = _extract_pilot_symbols(pref_abs, f_err_loc)
+            Hk_pilot, pilot_rms = _extract_pilot_symbols(pref_abs, f_err_loc, packet_idx=packet_idx)
         
         # Если пилоты успешно извлечены - используем их для инициализации эквалайзера
         if Hk_pilot is not None:
@@ -227,6 +259,14 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
             print(f"[EQ-INIT] Using preamble-only Hk: avg_mag={np.mean(np.abs(Hk_init)):.4f}")
         
         # Создаем отдельный экземпляр эквалайзера для этой попытки
+        # Если есть глобальный эквалайзер от предыдущего пакета - используем его как начальную точку
+        if _rx_st.global_equalizer is not None and packet_idx > 0:
+            # Используем Hk от предыдущего пакета как начальную точку
+            Hk_from_prev = _rx_st.global_equalizer.get_current_Hk()
+            # Усредняем с новой оценкой для плавного перехода
+            Hk_init = (Hk_init + Hk_from_prev) / 2
+            print(f"[EQ] Using Hk from previous packet as initial point")
+        
         equalizer = AdaptiveEqualizer(initial_Hk=Hk_init, alpha=0.02, modulation=modulation)
         print(f"[EQ] Modulation {modulation}: AdaptiveEqualizer initialized with alpha=0.02, initial_avg_mag={np.mean(np.abs(Hk_init)):.4f}")
         
@@ -276,17 +316,32 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
     except Exception:
         packet_gain = 1.0
     
-    # Переводим логические блоки в физические символы
-    physical_symbols_expected = packet_blocks_expected * ofdm_symbols_per_block
+    # Переводим логические блоки в физические символы (данные)
+    data_symbols_expected = packet_blocks_expected * ofdm_symbols_per_block
+    
+    # Вычисляем общее количество символов (данные + пилоты)
+    # Пилоты вставляются через каждые PILOT_INTERVAL символов данных
+    n_data_pilots = data_symbols_expected // PILOT_INTERVAL if PILOT_INTERVAL > 0 else 0
+    total_symbols_expected = data_symbols_expected + n_data_pilots
+    
+    print(f"[RX-DATA-PILOTS] data_symbols={data_symbols_expected}, pilots={n_data_pilots}, total={total_symbols_expected}")
+    
+    # Эталонный пилотный символ для обновления эквалайзера (все поднесущие = (1+1j)/√2)
+    S_pilot_ref = (1 + 1j) / np.sqrt(2) * np.ones(Nsub, dtype=complex)
     
     pkt_data_start = pref_abs + len(_rx_st.preamble_td)
-    pkt_payload_samples = physical_symbols_expected * SYMBOL_LEN
+    pkt_payload_samples = total_symbols_expected * SYMBOL_LEN
     seg = packet_gain * _rx_st.rx[pkt_data_start : pkt_data_start + pkt_payload_samples]
     if len(seg) < pkt_payload_samples:
         return None
-    frames = seg.reshape(physical_symbols_expected, SYMBOL_LEN)
+    frames = seg.reshape(total_symbols_expected, SYMBOL_LEN)
     
     rx_syms_pkt_list = []
+    
+    # Счётчики для отладки
+    clipped_gain_count = 0  # Количество символов с clipped gain_sym
+    pilot_count = 0  # Счётчик пилотных символов
+    data_count = 0  # Счётчик символов данных
     
     for idxf, fr in enumerate(frames):
         frame_start_abs = pkt_data_start + idxf * SYMBOL_LEN
@@ -295,70 +350,128 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         tv = t_frame_start + np.arange(Nfft) / float(fs)
         useful_corr = useful * np.exp(-1j * 2.0 * np.pi * f_err_loc * tv)
         
-        cur_rms = np.sqrt(np.mean(np.abs(useful)**2)) if useful.size > 0 else 1e-12
-        est_rms = (1.0 - AGC_ALPHA) * _rx_st.last_agc_rms + AGC_ALPHA * cur_rms
+        # === Вычисление RMS до AGC ===
+        cur_rms_before_agc = np.sqrt(np.mean(np.abs(useful)**2)) if useful.size > 0 else 1e-12
+        
+        est_rms = (1.0 - AGC_ALPHA) * _rx_st.last_agc_rms + AGC_ALPHA * cur_rms_before_agc
         _rx_st.last_agc_rms = est_rms
         if est_rms < 1e-12:
             est_rms = 1e-12
         gain_sym = SYMBOL_TARGET_RMS / est_rms
-        # Ограничиваем gain_sym, чтобы избежать перегрузки или слишком слабого сигнала
-        gain_sym = np.clip(gain_sym, 0.1, 10.0)
         
-        # Отладочный вывод AGC
+        # Проверяем, будет ли gain_sym clipped
+        gain_sym_raw = gain_sym
+        gain_sym = np.clip(gain_sym, 0.1, 10.0)
+        if gain_sym != gain_sym_raw:
+            clipped_gain_count += 1
+        
+        # === Определяем, является ли текущий символ пилотом ===
+        # Пилоты идут на позициях: PILOT_INTERVAL, 2*PILOT_INTERVAL+1, 3*PILOT_INTERVAL+2, ...
+        # Формула: (idxf + 1) % (PILOT_INTERVAL + 1) == 0
+        is_pilot = (PILOT_INTERVAL > 0 and
+                    (idxf + 1) % (PILOT_INTERVAL + 1) == 0 and
+                    idxf < total_symbols_expected - 1)  # не последний символ
+        
+        # === Расширенный отладочный вывод для первых символов ===
         if AGC_DEBUG:
-            print(f"[AGC] pkt={packet_idx} frame={idxf} cur_rms={cur_rms:.6f} est_rms={est_rms:.6f} gain_sym={gain_sym:.3f}")
+            if not is_pilot and data_count < 5:
+                # Для первых 5 символов данных: RMS до AGC, gain_sym, RMS после AGC
+                print(f"[AGC-DATA] pkt={packet_idx} frame={idxf} data_idx={data_count} "
+                      f"rms_before={cur_rms_before_agc:.6f} est_rms={est_rms:.6f} "
+                      f"gain_sym={gain_sym:.3f} (raw={gain_sym_raw:.3f})")
+            elif is_pilot and pilot_count < 5:
+                # Для первых 5 пилотов: RMS, ожидаемый уровень
+                expected_rms = SYMBOL_TARGET_RMS  # Ожидаемый RMS пилота
+                print(f"[AGC-PILOT] pkt={packet_idx} frame={idxf} pilot_idx={pilot_count} "
+                      f"rms_before={cur_rms_before_agc:.6f} expected_rms={expected_rms:.6f} "
+                      f"ratio={cur_rms_before_agc/expected_rms if expected_rms > 0 else 0:.3f}")
         
         # Сохраняем данные AGC для последующего построения графика
         _rx_st.agc_history_list.append({
             'symbol_idx': _rx_st._global_symbol_counter,
             'pkt_idx': packet_idx,
             'frame_idx': idxf,
-            'cur_rms': cur_rms,
+            'cur_rms': cur_rms_before_agc,
             'est_rms': est_rms,
-            'gain_sym': gain_sym
+            'gain_sym': gain_sym,
+            'is_pilot': is_pilot
         })
         _rx_st._global_symbol_counter += 1
         
         useful = useful * gain_sym
+        
+        # === Вычисление RMS после AGC ===
+        cur_rms_after_agc = np.sqrt(np.mean(np.abs(useful)**2)) if useful.size > 0 else 1e-12
+        
+        # Отладочный вывод RMS после AGC для первых символов
+        if AGC_DEBUG:
+            if not is_pilot and data_count < 5:
+                print(f"[AGC-DATA-AFTER] pkt={packet_idx} frame={idxf} data_idx={data_count} "
+                      f"rms_after={cur_rms_after_agc:.6f} target={SYMBOL_TARGET_RMS}")
+        
         # Применяем AGC-усиление к сигналу с компенсацией частотного сдвига
         useful_corr = useful * np.exp(-1j * 2.0 * np.pi * f_err_loc * tv)
         
         try:
             F = np.fft.fft(useful_corr) / Nfft
-            subc = equalizer.process(F[subc_inds])
-            # Отладочный вывод амплитуды после эквалайзера
-            if AGC_DEBUG and idxf < 3:
-                print(f"[EQ-OUT] pkt={packet_idx} frame={idxf} subc_rms={np.sqrt(np.mean(np.abs(subc)**2)):.6f} subc_max={np.max(np.abs(subc)):.6f}")
-        except Exception:
-            subc = np.zeros(Nsub, dtype=complex)
-
-        # Сохраняем текущее состояние Hk в историю эквалайзера для водопадной диаграммы
-        try:
-            _rx_st.equalizer_history_list.append(equalizer.get_current_Hk().copy())
-            # print(f"[EQ-HIST] Сохранен снимок Hk #{len(_rx_st.equalizer_history_list)} "
-            #       f"для символа {idxf} пакета {packet_idx}")
+            R = F[subc_inds]
+            
+            if is_pilot:
+                # ПИЛОТНЫЙ СИМВОЛ: обновляем Hk эквалайзера по известному эталону
+                equalizer.update_from_pilot(R, S_pilot_ref)
+                pilot_count += 1
+                
+                # Пилот НЕ добавляется в выходной поток данных
+                if AGC_DEBUG and pilot_count <= 5:
+                    Hk = equalizer.get_current_Hk()
+                    print(f"[RX-PILOT-DATA] pkt={packet_idx} pilot at frame={idxf} "
+                          f"Hk_avg_mag={np.mean(np.abs(Hk)):.4f} "
+                          f"Hk_avg_phase={np.mean(np.angle(Hk)):.4f} rad")
+            else:
+                # СИМВОЛ ДАННЫХ: применяем текущий Hk без обновления
+                subc = equalizer.apply_only(R)
+                data_count += 1
+                
+                # Сохраняем текущее состояние Hk в историю эквалайзера для водопадной диаграммы
+                try:
+                    _rx_st.equalizer_history_list.append(equalizer.get_current_Hk().copy())
+                except Exception as e:
+                    print(f"[EQ-HIST] Ошибка сохранения Hk: {e}")
+                
+                # Обновляем водопадную диаграмму эквалайзера (если включена)
+                if waterfall is not None:
+                    try:
+                        waterfall.update(equalizer.get_current_Hk())
+                    except Exception as e:
+                        print(f"[EQ-WF] Ошибка обновления водопада: {e}")
+                
+                if modem_config.subc_phases is not None and np.any(modem_config.subc_phases != 0):
+                    subc = subc * np.exp(-1j * modem_config.subc_phases)
+                
+                rx_syms_pkt_list.append(subc)
+                
+                # Сохраняем символы для градиентного созвездия
+                _rx_st.rx_constellation_symbols.extend(subc)
+                
+                # Отладочный вывод амплитуды после эквалайзера
+                if AGC_DEBUG and data_count <= 5:
+                    print(f"[EQ-OUT] pkt={packet_idx} frame={idxf} data_idx={data_count-1} "
+                          f"subc_rms={np.sqrt(np.mean(np.abs(subc)**2)):.6f} "
+                          f"subc_max={np.max(np.abs(subc)):.6f} "
+                          f"subc_mean_real={np.mean(np.real(subc)):.4f} "
+                          f"subc_mean_imag={np.mean(np.imag(subc)):.4f}")
         except Exception as e:
-            print(f"[EQ-HIST] Ошибка сохранения Hk: {e}")
-        
-        # Обновляем водопадную диаграмму эквалайзера (если включена)
-        if waterfall is not None:
-            try:
-                waterfall.update(equalizer.get_current_Hk())
-            except Exception as e:
-                print(f"[EQ-WF] Ошибка обновления водопада: {e}")
-        
-        if modem_config.subc_phases is not None and np.any(modem_config.subc_phases != 0):
-            subc = subc * np.exp(-1j * modem_config.subc_phases)
-        
-        # Отладочный вывод амплитуды перед сохранением
-        if AGC_DEBUG and idxf < 3:
-            print(f"[POST-PHASE] pkt={packet_idx} frame={idxf} subc_rms={np.sqrt(np.mean(np.abs(subc)**2)):.6f}")
-        
-        rx_syms_pkt_list.append(subc)
-        
-        # Сохраняем символы для градиентного созвездия
-        _rx_st.rx_constellation_symbols.extend(subc)
-        # print(f"[DEBUG] Добавлено {len(subc)} символов, всего: {len(_rx_st.rx_constellation_symbols)}")
+            print(f"[RX-ERR] Exception at frame={idxf} is_pilot={is_pilot}: {e}")
+            if not is_pilot:
+                subc = np.zeros(Nsub, dtype=complex)
+                rx_syms_pkt_list.append(subc)
+                data_count += 1
+    
+    # === Итоговая статистика по пакету ===
+    print(f"[RX-STATS] pkt={packet_idx} total_frames={len(frames)} "
+          f"data_symbols={data_count} pilot_symbols={pilot_count} "
+          f"clipped_gain={clipped_gain_count}/{len(frames)} "
+          f"rx_syms_list_len={len(rx_syms_pkt_list)}")
     
     if len(rx_syms_pkt_list) == 0:
         return None
@@ -377,14 +490,32 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
     else:
         bits_pkt = qpsk_demap(rx_syms_pkt)
     
+    # === Отладочный вывод перед деинтерливингом ===
+    print(f"[RX-BITS-BEFORE-DEINTER] pkt={packet_idx} bits_len={len(bits_pkt)} "
+          f"bits_per_ofdm_symbol={bits_per_ofdm_symbol} "
+          f"n_data_symbols={data_count} "
+          f"expected_bits={data_count * bits_per_ofdm_symbol}")
+    
     # Применяем деинтерливинг с правильным размером блока для данной модуляции
     bits_pkt = deinterleave_bits(bits_pkt, block_size=bits_per_ofdm_symbol)
+    
+    # === Отладочный вывод после деинтерливинга ===
+    print(f"[RX-BITS-AFTER-DEINTER] pkt={packet_idx} bits_len={len(bits_pkt)}")
     
     # RS декодирование
     cw_bits = RS_CW_BITS
     n_cw = len(bits_pkt) // cw_bits
     rs_ok = 0
     decoded_blocks = []
+    
+    # === Отладочный вывод первых RS кодовых слов ===
+    for ci in range(min(n_cw, 3)):  # Первые 3 кодовых слова
+        bstart = ci * cw_bits
+        bbits = bits_pkt[bstart:bstart+cw_bits]
+        if len(bbits) < cw_bits:
+            bbits = np.concatenate((bbits, np.zeros(cw_bits - len(bbits), dtype=int)))
+        bts = bits_to_bytes(bbits)
+        print(f"[RX-RS-CW] pkt={packet_idx} ci={ci} first_16_bytes={bts[:16].hex()}")
     
     for ci in range(n_cw):
         bstart = ci * cw_bits
@@ -399,6 +530,8 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         except Exception as e:
             msg = b'\x00' * RS_DATA_BYTES
             decoded_blocks.append((msg, False))  # Ошибка декодирования
+    
+    print(f"[RX-RS-RESULT] pkt={packet_idx} RS_OK={rs_ok}/{n_cw}")
     
     # Закрываем водопадную диаграмму если она была создана
     if waterfall is not None:

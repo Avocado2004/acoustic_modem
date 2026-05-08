@@ -19,7 +19,8 @@ from modem_config import (fs, Nfft, Ncp, Nsub, subc_inds,
                            PLOT_CONSTELLATION_TX_OFDM, CONSTELLATION_TX_OFDM_FILENAME,
                            CONSTELLATION_TX_OFDM_COMPENSATE_PHASE,
                            CONSTELLATION_TX_OFDM_COMPENSATED_FILENAME,
-                           PREAMBLE_PILOT_SYMBOLS, WARMUP_SYMBOLS, WARMUP_LEVEL)
+                           PREAMBLE_PILOT_SYMBOLS, WARMUP_SYMBOLS, WARMUP_LEVEL,
+                           PILOT_INTERVAL)
 from modem_modulation import (qpsk_map, bpsk_map, bytes_to_bits, bits_to_bytes,
                                ofdm_symbol, build_preamble, build_data_td, zc_root_sequence,
                                interleave_bits)
@@ -310,12 +311,78 @@ def _generate_pilot_symbols(n_symbols):
     
     for i in range(n_symbols):
         # Используем ofdm_symbol() для генерации временного сигнала
+        # ofdm_symbol() уже включает CP, поэтому добавляем x напрямую
         x = ofdm_symbol(pilot_syms)
-        
-        # Добавляем CP
-        pilot_samples.append(np.concatenate((x[-Ncp:], x)))
+        pilot_samples.append(x)
     
     return np.concatenate(pilot_samples)
+
+
+def _insert_data_pilots(td_data, n_data_symbols):
+    """
+    Вставка пилотных символов внутрь потока данных через каждые PILOT_INTERVAL символов.
+    
+    Пилотный символ: все поднесущие = (1+1j)/√2 (как в преамбуле).
+    Пилоты вставляются после каждых PILOT_INTERVAL символов данных для непрерывной
+    подстройки эквалайзера и фазы приёмника.
+    
+    Параметры
+    ----------
+    td_data : np.ndarray
+        Временной сигнал данных (все OFDM символы подряд)
+    n_data_symbols : int
+        Количество символов данных в td_data
+    
+    Возвращает
+    -------
+    np.ndarray
+        Временной сигнал с вставленными пилотами (данные + пилоты)
+    int
+        Количество вставленных пилотных символов
+    """
+    if PILOT_INTERVAL <= 0 or n_data_symbols <= 0:
+        return td_data, 0
+    
+    # Вычисляем количество пилотов: один пилот после каждых PILOT_INTERVAL символов
+    n_pilots = n_data_symbols // PILOT_INTERVAL
+    
+    if n_pilots == 0:
+        return td_data, 0
+    
+    # Генерируем один пилотный временной символ (с CP)
+    pilot_syms = (1 + 1j) / np.sqrt(2) * np.ones(Nsub, dtype=complex)
+    cur_rms = np.sqrt(np.mean(np.abs(pilot_syms)**2))
+    if cur_rms > 0:
+        pilot_syms = pilot_syms / cur_rms * SYMBOL_TX_TARGET
+    pilot_td = ofdm_symbol(pilot_syms)  # уже включает CP
+    
+    # Разбиваем данные на блоки по SYMBOL_LEN сэмплов и вставляем пилоты
+    result_parts = []
+    symbols_processed = 0
+    
+    for i in range(0, n_data_symbols, PILOT_INTERVAL):
+        # Берём блок из до PILOT_INTERVAL символов данных
+        block_end = min(i + PILOT_INTERVAL, n_data_symbols)
+        block_samples = td_data[i * SYMBOL_LEN : block_end * SYMBOL_LEN]
+        result_parts.append(block_samples)
+        symbols_processed = block_end
+        
+        # Вставляем пилот после блока (если это не последний неполный блок)
+        if block_end < n_data_symbols:
+            result_parts.append(pilot_td)
+    
+    # Добавляем оставшиеся сэмплы (если есть)
+    remaining_start = symbols_processed * SYMBOL_LEN
+    if remaining_start < len(td_data):
+        result_parts.append(td_data[remaining_start:])
+    
+    result = np.concatenate(result_parts)
+    
+    print(f"[TX-DATA-PILOTS] Inserted {n_pilots} pilots into {n_data_symbols} data symbols "
+          f"(every {PILOT_INTERVAL} symbols). Total: {n_data_symbols + n_pilots} symbols, "
+          f"{len(result)} samples")
+    
+    return result, n_pilots
 
 
 def _transmit_data(data_bytes, total_data_len, filename_bytes, mode='T', packet_blocks=DEFAULT_PACKET_BLOCKS):
@@ -412,9 +479,20 @@ def _transmit_data(data_bytes, total_data_len, filename_bytes, mode='T', packet_
             td_now = td_now[:allowed_physical_symbols * SYMBOL_LEN]
             n_physical_now = allowed_physical_symbols
 
+        # === Вставка пилотных символов внутрь потока данных ===
+        # Пилоты вставляются через каждые PILOT_INTERVAL символов данных
+        # для непрерывной подстройки эквалайзера приёмника
+        n_data_pilots = 0
+        if PILOT_INTERVAL > 0 and n_physical_now > 0:
+            td_now, n_data_pilots = _insert_data_pilots(td_now, n_physical_now)
+            # Обновляем количество физических символов (данные + пилоты)
+            n_physical_now = n_physical_now + n_data_pilots
+
         # Для отладки: вычисляем, сколько логических блоков мы отправили
         n_logical_sent = n_physical_now // modem_config.OFDM_SYMBOLS_PER_BLOCK
-        print(f"[TX-DBG] packet_no={packet_no} is_first={is_first} payload_bytes={best_sz} physical_symbols={n_physical_now} logical_blocks={n_logical_sent} header_first16={header_bytes[:16].hex()}")
+        print(f"[TX-DBG] packet_no={packet_no} is_first={is_first} payload_bytes={best_sz} "
+              f"physical_symbols={n_physical_now} (data={n_physical_now - n_data_pilots} pilots={n_data_pilots}) "
+              f"logical_blocks={n_logical_sent} header_first16={header_bytes[:16].hex()}")
 
         # Добавляем пилотные символы перед преамбулой первого пакета
         # для настройки AGC и эквалайзера приёмника
