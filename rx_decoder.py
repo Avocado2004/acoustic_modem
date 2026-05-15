@@ -264,53 +264,59 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         print(f"[EQ-INIT] Hk_est: median_abs={Hk_mag_raw:.4f}, clipped={Hk_mag:.4f}, mean_phase={np.mean(np.angle(Hk_est)):.4f} rad")
         print(f"[EQ-INIT] R1t[subc] rms={np.sqrt(np.mean(np.abs(R1t[subc_inds])**2)):.6f}, S_ref[subc] rms={np.sqrt(np.mean(np.abs(S_ref[subc_inds])**2)):.6f}")
         
-        # Пытаемся использовать пилотные символы для более точной оценки канала
-        # Пилоты существуют только для первого пакета (packet_idx == 0)
-        Hk_pilot = None
-        pilot_rms = None
-        if PREAMBLE_PILOT_SYMBOLS > 0:
-            Hk_pilot, pilot_rms = _extract_pilot_symbols(pref_abs, f_err_loc, packet_idx=packet_idx)
-        
-        # Если пилоты успешно извлечены - используем их для инициализации эквалайзера
-        if Hk_pilot is not None:
-            # Усредняем Hk от пилотов и Hk от преамбулы для лучшей оценки
-            Hk_combined = (Hk_pilot + Hk_s) / 2
-            Hk_init = Hk_combined
-            print(f"[EQ-INIT] Using combined Hk (pilots + preamble): avg_mag={np.mean(np.abs(Hk_init)):.4f}")
-        else:
-            Hk_init = Hk_s
-            print(f"[EQ-INIT] Using preamble-only Hk: avg_mag={np.mean(np.abs(Hk_init)):.4f}")
-        
-        # Создаем отдельный экземпляр эквалайзера для этой попытки
-        # Если есть глобальный эквалайзер от предыдущего пакета - используем его как начальную точку
-        if _rx_st.global_equalizer is not None and packet_idx > 0:
-            # Используем Hk от предыдущего пакета как начальную точку
-            Hk_from_prev = _rx_st.global_equalizer.get_current_Hk()
-            # Усредняем с новой оценкой для плавного перехода
-            Hk_init = (Hk_init + Hk_from_prev) / 2
-            print(f"[EQ] Using Hk from previous packet as initial point")
-        
-        equalizer = AdaptiveEqualizer(initial_Hk=Hk_init, alpha=0.02, modulation=modulation)
-        print(f"[EQ] Modulation {modulation}: AdaptiveEqualizer initialized with alpha=0.02, initial_avg_mag={np.mean(np.abs(Hk_init)):.4f}")
-        
-        # Создаём визуализацию водопадной диаграммы (если запрошена)
+        # Инициализация эквалайзера (только если включён в конфигурации)
+        equalizer = None
         waterfall = None
-        if show_waterfall:
-            try:
-                from equalizer_waterfall import EqualizerWaterfall
-                waterfall = EqualizerWaterfall(
-                    subc_inds=subc_inds,
-                    fs=fs,
-                    Nfft=Nfft,
-                    max_symbols=500,
-                    title_prefix=f"EQ Waterfall pkt={packet_idx} mod={modulation}"
-                )
-                # Показываем начальное состояние Hk
-                waterfall.update(equalizer.get_current_Hk())
-                print(f"[EQ-WF] Водопадная диаграмма создана для pkt={packet_idx} mod={modulation}")
-            except Exception as e:
-                print(f"[EQ-WF] Ошибка создания водопадной диаграммы: {e}")
-                waterfall = None
+        
+        if modem_config.EQUALIZER_ENABLED:
+            # Пытаемся использовать пилотные символы для более точной оценки канала
+            # Пилоты существуют только для первого пакета (packet_idx == 0)
+            Hk_pilot = None
+            pilot_rms = None
+            if PREAMBLE_PILOT_SYMBOLS > 0:
+                Hk_pilot, pilot_rms = _extract_pilot_symbols(pref_abs, f_err_loc, packet_idx=packet_idx)
+            
+            # Если пилоты успешно извлечены - используем их для инициализации эквалайзера
+            if Hk_pilot is not None:
+                # Усредняем Hk от пилотов и Hk от преамбулы для лучшей оценки
+                Hk_combined = (Hk_pilot + Hk_s) / 2
+                Hk_init = Hk_combined
+                print(f"[EQ-INIT] Using combined Hk (pilots + preamble): avg_mag={np.mean(np.abs(Hk_init)):.4f}")
+            else:
+                Hk_init = Hk_s
+                print(f"[EQ-INIT] Using preamble-only Hk: avg_mag={np.mean(np.abs(Hk_init)):.4f}")
+            
+            # Создаем отдельный экземпляр эквалайзера для этой попытки
+            # Если есть глобальный эквалайзер от предыдущего пакета - используем его как начальную точку
+            if _rx_st.global_equalizer is not None and packet_idx > 0:
+                # Используем Hk от предыдущего пакета как начальную точку
+                Hk_from_prev = _rx_st.global_equalizer.get_current_Hk()
+                # Усредняем с новой оценкой для плавного перехода
+                Hk_init = (Hk_init + Hk_from_prev) / 2
+                print(f"[EQ] Using Hk from previous packet as initial point")
+            
+            equalizer = AdaptiveEqualizer(initial_Hk=Hk_init, alpha=0.02, modulation=modulation)
+            print(f"[EQ] Modulation {modulation}: AdaptiveEqualizer initialized with alpha=0.02, initial_avg_mag={np.mean(np.abs(Hk_init)):.4f}")
+            
+            # Создаём визуализацию водопадной диаграммы (если запрошена)
+            if show_waterfall:
+                try:
+                    from equalizer_waterfall import EqualizerWaterfall
+                    waterfall = EqualizerWaterfall(
+                        subc_inds=subc_inds,
+                        fs=fs,
+                        Nfft=Nfft,
+                        max_symbols=500,
+                        title_prefix=f"EQ Waterfall pkt={packet_idx} mod={modulation}"
+                    )
+                    # Показываем начальное состояние Hk
+                    waterfall.update(equalizer.get_current_Hk())
+                    print(f"[EQ-WF] Водопадная диаграмма создана для pkt={packet_idx} mod={modulation}")
+                except Exception as e:
+                    print(f"[EQ-WF] Ошибка создания водопадной диаграммы: {e}")
+                    waterfall = None
+        else:
+            print(f"[EQ] Эквалайзер ОТКЛЮЧЁН (EQUALIZER_ENABLED=False), пропускаем инициализацию")
         
     except Exception as e:
         print(f"[RX-DBG-DECODE] Exception in channel estimation for {modulation}: {e}")
@@ -410,7 +416,13 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
             R_all = F[subc_inds]  # Все 49 поднесущих
             
             # Эквалайзер работает со всеми 49 поднесущими (включая пилот)
-            subc_all = equalizer.apply_only(R_all)
+            # Применяем только если эквалайзер включён в конфигурации
+            if modem_config.EQUALIZER_ENABLED:
+                subc_all = equalizer.apply_only(R_all)
+                print(f"[EQ] Эквалайзер применён к символу {data_count}")
+            else:
+                # Эквалайзер отключён — пропускаем выравнивание
+                subc_all = R_all
             
             # Исключаем пилот-поднесущую (индекс PILOT_SUBC_INDEX) — она не несёт данных
             data_indices = [i for i in range(Nsub) if i != pilot_idx]
@@ -419,13 +431,14 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
             data_count += 1
             
             # Сохраняем текущее состояние Hk в историю эквалайзера для водопадной диаграммы
-            try:
-                _rx_st.equalizer_history_list.append(equalizer.get_current_Hk().copy())
-            except Exception as e:
-                print(f"[EQ-HIST] Ошибка сохранения Hk: {e}")
+            if equalizer is not None:
+                try:
+                    _rx_st.equalizer_history_list.append(equalizer.get_current_Hk().copy())
+                except Exception as e:
+                    print(f"[EQ-HIST] Ошибка сохранения Hk: {e}")
             
             # Обновляем водопадную диаграмму эквалайзера (если включена)
-            if waterfall is not None:
+            if waterfall is not None and equalizer is not None:
                 try:
                     waterfall.update(equalizer.get_current_Hk())
                 except Exception as e:
@@ -569,8 +582,9 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
             
             print(f"[RX] Best modulation: {best_mod} with RS_OK={rs_ok}")
             
-            # Устанавливаем глобальный эквалайзер от лучшей попытки
-            _rx_st.global_equalizer = eq_instance
+            # Устанавливаем глобальный эквалайзер от лучшей попытки (если включён)
+            if eq_instance is not None:
+                _rx_st.global_equalizer = eq_instance
             
             # Устанавливаем глобальные настройки модуляции
             modem_config.MODULATION = best_mod
@@ -630,8 +644,9 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
         if result is not None:
             decoded_blocks, rs_ok, used_pre, eq_instance = result
             
-            # Обновляем глобальный эквалайзер
-            _rx_st.global_equalizer = eq_instance
+            # Обновляем глобальный эквалайзер (если включён)
+            if eq_instance is not None:
+                _rx_st.global_equalizer = eq_instance
             
             ret_bytes = b"".join([b for (b,ok) in decoded_blocks])
             return ret_bytes, rs_ok, used_pre
