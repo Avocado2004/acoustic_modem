@@ -25,16 +25,22 @@ Nfft = 512
 Ncp = 128
 df = fs / Nfft
 
-# Поднесущие: установить так, чтобы было ровно 48 поднесущих в диапазоне, начинающемся от ~300 Hz
+# Поднесущие: установить так, чтобы было ровно 49 поднесущих в диапазоне, начинающемся от ~300 Hz
+# Из них 48 несут данные, а поднесущая с индексом PILOT_SUBC_INDEX (25-я по счёту, индекс 24)
+# зарезервирована под пилот-сигнал для будущего функционала
 k_low = int(math.ceil(300 / df))
-REQUIRED_NSUB = 48
+REQUIRED_NSUB = 49
+PILOT_SUBC_INDEX = 24  # Индекс пилот-поднесущей в массиве поднесущих (0-based)
 k_high = k_low + REQUIRED_NSUB - 1
 subc_inds = np.arange(k_low, k_high + 1)
 Nsub = len(subc_inds)
+# FFT-бин пилот-поднесущей
+PILOT_SUBC_FD_BIN = subc_inds[PILOT_SUBC_INDEX]
 
 f_low_hz = k_low * df
 f_high_hz = k_high * df
 print(f"[CFG] df={df:.3f} Hz, k_low={k_low} -> {f_low_hz:.1f} Hz, k_high={k_high} -> {f_high_hz:.1f} Hz, Nsub={Nsub}")
+print(f"[CFG] Pilot subcarrier: index={PILOT_SUBC_INDEX}, FFT bin={PILOT_SUBC_FD_BIN}, freq={PILOT_SUBC_FD_BIN * df:.1f} Hz")
 
 # FEC (Reed-Solomon)
 RS_DATA_BYTES = 8
@@ -57,16 +63,22 @@ MODULATION = "QPSK"  # Default QPSK for backward compatibility
 
 # Количество физических OFDM символов, составляющих один логический блок.
 # Логический блок всегда несет 96 бит (одно RS кодовое слово).
-# QPSK: 1 символ * 96 бит = 96 бит -> OFDM_SYMBOLS_PER_BLOCK = 1
-# BPSK: 2 символа * 48 бит = 96 бит -> OFDM_SYMBOLS_PER_BLOCK = 2
+# Из Nsub поднесущих (49) одна (индекс PILOT_SUBC_INDEX) зарезервирована под пилот,
+# поэтому для данных доступно (Nsub - 1) = 48 поднесущих.
+# QPSK: 48 данных * 2 бита = 96 бит -> OFDM_SYMBOLS_PER_BLOCK = 1
+# BPSK: 48 данных * 1 бит = 48 бит -> OFDM_SYMBOLS_PER_BLOCK = 2 (96 бит)
 OFDM_SYMBOLS_PER_BLOCK = 1  # По умолчанию для QPSK
+
+# Количество поднесущих, несущих данные (исключая пилот-поднесущую)
+DATA_SUBC_COUNT = Nsub - 1  # 48 поднесущих данных
 
 # BITS_PER_OFDM_SYMBOL is now dynamic based on modulation
 if MODULATION == "BPSK":
     BITS_PER_SYMBOL = 1  # BPSK: 1 bit per subcarrier
 else:
     BITS_PER_SYMBOL = 2  # QPSK: 2 bits per subcarrier
-BITS_PER_OFDM_SYMBOL = Nsub * BITS_PER_SYMBOL
+# Бит на OFDM символ = только данные поднесущие (без пилот)
+BITS_PER_OFDM_SYMBOL = DATA_SUBC_COUNT * BITS_PER_SYMBOL
 
 # Check compatibility: BITS_PER_OFDM_SYMBOL should equal RS_CW_BITS for 1 RS cw per OFDM symbol
 if BITS_PER_OFDM_SYMBOL != RS_CW_BITS:
@@ -101,7 +113,7 @@ def set_modulation(modulation_type):
         BITS_PER_SYMBOL = 2  # QPSK: 2 bits per subcarrier
         OFDM_SYMBOLS_PER_BLOCK = 1  # 1 символ QPSK = 1 логический блок (96 бит)
     
-    BITS_PER_OFDM_SYMBOL = Nsub * BITS_PER_SYMBOL
+    BITS_PER_OFDM_SYMBOL = DATA_SUBC_COUNT * BITS_PER_SYMBOL
     
     print(f"[CFG] Модуляция изменена на {MODULATION}: BITS_PER_SYMBOL={BITS_PER_SYMBOL}, BITS_PER_OFDM_SYMBOL={BITS_PER_OFDM_SYMBOL}, OFDM_SYMBOLS_PER_BLOCK={OFDM_SYMBOLS_PER_BLOCK}")
     

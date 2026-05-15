@@ -438,7 +438,7 @@ class TestTxOfdmConstellationCollection:
     def test_collect_tx_ofdm_constellation_symbols_qpsk(self):
         """Тест сбора OFDM символов созвездия для QPSK на передаче."""
         from modem_tx import _collect_tx_ofdm_constellation_symbols
-        from modem_config import set_modulation, Nsub
+        from modem_config import set_modulation, DATA_SUBC_COUNT
 
         set_modulation("QPSK")
 
@@ -459,16 +459,16 @@ class TestTxOfdmConstellationCollection:
         for sym in symbols:
             assert isinstance(sym, (complex, np.complexfloating))
 
-        # Количество FD символов должно быть кратно Nsub
-        assert len(symbols) % Nsub == 0
+        # Количество FD символов должно быть кратно DATA_SUBC_COUNT (пилот-поднесущая исключена)
+        assert len(symbols) % DATA_SUBC_COUNT == 0
 
-        n_ofdm_symbols = len(symbols) // Nsub
+        n_ofdm_symbols = len(symbols) // DATA_SUBC_COUNT
         print(f"[TEST] Collected {len(symbols)} QPSK OFDM FD symbols ({n_ofdm_symbols} OFDM symbols)")
 
     def test_collect_tx_ofdm_constellation_symbols_bpsk(self):
         """Тест сбора OFDM символов созвездия для BPSK на передаче."""
         from modem_tx import _collect_tx_ofdm_constellation_symbols
-        from modem_config import set_modulation, Nsub
+        from modem_config import set_modulation, DATA_SUBC_COUNT
 
         set_modulation("BPSK")
 
@@ -485,10 +485,10 @@ class TestTxOfdmConstellationCollection:
         assert symbols is not None
         assert len(symbols) > 0
 
-        # Количество FD символов должно быть кратно Nsub
-        assert len(symbols) % Nsub == 0
+        # Количество FD символов должно быть кратно DATA_SUBC_COUNT (пилот-поднесущая исключена)
+        assert len(symbols) % DATA_SUBC_COUNT == 0
 
-        n_ofdm_symbols = len(symbols) // Nsub
+        n_ofdm_symbols = len(symbols) // DATA_SUBC_COUNT
         print(f"[TEST] Collected {len(symbols)} BPSK OFDM FD symbols ({n_ofdm_symbols} OFDM symbols)")
 
         # Возвращаем QPSK обратно

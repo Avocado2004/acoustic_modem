@@ -236,18 +236,22 @@ def ace_reduce_peaks(ds, Nfft_local, subc_inds_local):
 # -----------------------
 # OFDM symbol build
 # -----------------------
-def ofdm_symbol(data_syms, return_fd=False):
+def ofdm_symbol(data_syms, return_fd=False, is_preamble=False):
     """
     Сборка OFDM символа из поднесущих.
     
     Параметры
     ----------
     data_syms : array-like
-        Комплексные символы поднесущих (длина Nsub)
+        Комплексные символы поднесущих (длина Nsub=49)
     return_fd : bool
         Если True, также вернуть поднесущие в частотной области
         после всех обработок (нормализация, ACE, фазы), но до IFFT.
         Это используется для визуализации созвездия после OFDM.
+    is_preamble : bool
+        Если True, символ является частью преамбулы.
+        В преамбуле пилот-поднесущая (индекс PILOT_SUBC_INDEX) = 0 (тишина).
+        В данных пилот-поднесущая = символ "0" (QPSK: (1+1j)/√2, BPSK: +1).
     
     Возвращает
     -------
@@ -261,6 +265,20 @@ def ofdm_symbol(data_syms, return_fd=False):
     else:
         ds = np.array(data_syms[:Nsub], dtype=complex)
 
+    # Обработка пилот-поднесущей (индекс PILOT_SUBC_INDEX)
+    pilot_idx = modem_config.PILOT_SUBC_INDEX
+    if is_preamble:
+        # В преамбуле пилот-поднесущая = 0 (тишина)
+        ds[pilot_idx] = 0.0 + 0.0j
+    else:
+        # В данных пилот-поднесущая = символ "0"
+        # Для QPSK: "00" → (1+1j)/√2
+        # Для BPSK: "0" → +1
+        if modem_config.MODULATION == "BPSK":
+            ds[pilot_idx] = 1.0 + 0.0j  # BPSK символ "0"
+        else:
+            ds[pilot_idx] = (1.0 + 1.0j) / np.sqrt(2)  # QPSK символ "00"
+
     try:
         eps = 1e-12
         cur_rms = np.sqrt(np.mean(np.abs(ds)**2)) if ds.size > 0 else 0.0
@@ -270,7 +288,10 @@ def ofdm_symbol(data_syms, return_fd=False):
     except Exception:
         pass
 
+    # ACE не затрагивает пилот-поднесущую — сохраняем её значение
+    pilot_val_before_ace = ds[pilot_idx]
     ds = ace_reduce_peaks(ds, Nfft, subc_inds)
+    ds[pilot_idx] = pilot_val_before_ace
 
     if modem_config.subc_phases is not None and np.any(modem_config.subc_phases != 0):
         ds = ds * np.exp(1j * modem_config.subc_phases)
@@ -305,11 +326,32 @@ def zc_root_sequence(u: int, L: int):
 # build_preamble: ZC, ZC, pilot, pilot
 # -----------------------
 def build_preamble(reps=1, zc_root=1):
-    """Сборка преамбулы из ZC и пилот-символов."""
-    zc_seq = zc_root_sequence(zc_root, Nsub)
-    S_zc = ofdm_symbol(zc_seq)
-    pilot = np.full(Nsub, (1 + 1j) / np.sqrt(2))
-    S_pilot = ofdm_symbol(pilot)
+    """
+    Сборка преамбулы из ZC и пилот-символов.
+    
+    Преамбула: [ZC | ZC | Pilot | Pilot] (4 OFDM символа)
+    
+    Важно: поднесущая с индексом PILOT_SUBC_INDEX (25-я) в преамбуле не используется (тишина).
+    ZC последовательность длиной DATA_SUBC_COUNT=48 размещается на поднесущих,
+    пропуская позицию пилот-поднесущей.
+    Pilot символы заполняют 48 поднесущих значением (1+j)/√2, пропуская пилот-поднесущую.
+    """
+    pilot_idx = modem_config.PILOT_SUBC_INDEX
+    data_subc = modem_config.DATA_SUBC_COUNT  # 48
+    
+    # ZC последовательность: длина 48 (не 49!), размещаем на поднесущих с пропуском пилота
+    zc_seq_data = zc_root_sequence(zc_root, data_subc)
+    zc_full = np.zeros(Nsub, dtype=complex)
+    # Размещаем ZC на поднесущих, пропуская индекс пилот-поднесущей
+    data_indices = [i for i in range(Nsub) if i != pilot_idx]
+    zc_full[data_indices] = zc_seq_data
+    S_zc = ofdm_symbol(zc_full, is_preamble=True)
+    
+    # Pilot символ: 48 поднесущих = (1+j)/√2, пилот-поднесущая = 0
+    pilot_full = np.zeros(Nsub, dtype=complex)
+    pilot_full[data_indices] = (1 + 1j) / np.sqrt(2)
+    S_pilot = ofdm_symbol(pilot_full, is_preamble=True)
+    
     preamble = np.concatenate((S_zc, S_zc, S_pilot, S_pilot))
     
     # Нормализуем преамбулу к SYMBOL_TX_TARGET (как и ofdm_symbol())
@@ -326,14 +368,18 @@ def build_data_td(bits, collect_fd=False):
     
     Алгоритм:
     1. Преобразование битов в символы модуляции (BPSK или QPSK)
-    2. Дополнение нулями до кратности Nsub (количество поднесущих)
-    3. Разбиение на блоки по Nsub символов (каждый блок = один OFDM символ)
-    4. Преобразование каждого блока в OFDM символ во временной области
+    2. Дополнение нулями до кратности DATA_SUBC_COUNT (48 поднесущих данных)
+    3. Разбиение на блоки по DATA_SUBC_COUNT символов
+    4. Добавление пилот-поднесущей (символ "0") в позицию PILOT_SUBC_INDEX
+    5. Преобразование каждого блока в OFDM символ во временной области
+    
+    Важно: данные размещаются только на 48 поднесущих (DATA_SUBC_COUNT).
+    Поднесущая с индексом PILOT_SUBC_INDEX автоматически заполняется
+    символом "0" в ofdm_symbol().
     
     Особенности для BPSK:
-    - BPSK48: 48 поднесущих × 1 бит = 48 бит/OFDM символ
+    - 48 поднесущих данных × 1 бит = 48 бит/OFDM символ
     - Для формирования одного RS слова (96 бит) требуется 2 OFDM символа BPSK
-    - BPSK96 (будущая поддержка): 96 поднесущих × 1 бит = 96 бит/OFDM символ
     
     Параметры
     ----------
@@ -357,39 +403,73 @@ def build_data_td(bits, collect_fd=False):
         syms = bpsk_map(bits)
     else:
         syms = qpsk_map(bits)
-    pad = (-len(syms)) % Nsub
+    
+    # Дополняем до кратности DATA_SUBC_COUNT (48), не Nsub (49)
+    data_subc = modem_config.DATA_SUBC_COUNT
+    pad = (-len(syms)) % data_subc
     if pad:
         syms = np.concatenate((syms, np.zeros(pad, dtype=complex)))
-    blk = syms.reshape(-1, Nsub)
+    
+    # Разбиваем на блоки по DATA_SUBC_COUNT символов
+    blk_data = syms.reshape(-1, data_subc)
+    
+    # Добавляем пилот-поднесущую в каждый блок
+    # Пилот-поднесущая всегда = символ "0" (будет установлена в ofdm_symbol)
+    pilot_idx = modem_config.PILOT_SUBC_INDEX
+    blk_full = np.zeros((blk_data.shape[0], Nsub), dtype=complex)
+    for i in range(blk_data.shape[0]):
+        # Вставляем данные, пропуская позицию пилот-поднесущей
+        data_idx = 0
+        for j in range(Nsub):
+            if j == pilot_idx:
+                continue  # Пилот-поднесущая заполнится в ofdm_symbol()
+            blk_full[i, j] = blk_data[i, data_idx]
+            data_idx += 1
     
     if collect_fd:
         # Собираем FD символы для созвездия
         td_list = []
         fd_list = []
-        for b in blk:
+        for b in blk_full:
             td_sym, fd_sym = ofdm_symbol(b, return_fd=True)
             td_list.append(td_sym)
             fd_list.append(fd_sym)
         td = np.concatenate(td_list)
         fd_symbols = np.concatenate(fd_list)
-        return td, blk.shape[0], fd_symbols
+        return td, blk_full.shape[0], fd_symbols
     else:
-        td = [ofdm_symbol(b) for b in blk]
-        return np.concatenate(td), blk.shape[0]
+        td = [ofdm_symbol(b) for b in blk_full]
+        return np.concatenate(td), blk_full.shape[0]
 
 # -----------------------
 # Habr optimizer (unchanged)
 # -----------------------
 def make_training_blocks(n_blocks=HABR_SAMPLE_BLOCKS, seed=HABR_SEED):
-    """Создание блоков для тренировки фаз."""
+    """
+    Создание блоков для тренировки фаз.
+    
+    Генерирует блоки поднесущих длиной Nsub (49), где:
+    - 48 поднесущих заполняются случайными данными
+    - Поднесущая с индексом PILOT_SUBC_INDEX = символ "0" (для пилота)
+    """
     rng = np.random.RandomState(seed)
     blocks = []
+    data_subc = modem_config.DATA_SUBC_COUNT  # 48
+    pilot_idx = modem_config.PILOT_SUBC_INDEX
     for _ in range(n_blocks):
-        bits = rng.randint(0, 2, Nsub * 2)
+        bits = rng.randint(0, 2, data_subc * 2)
         if modem_config.MODULATION == "BPSK":
-            syms = bpsk_map(bits[:Nsub])
+            syms_data = bpsk_map(bits[:data_subc])
         else:
-            syms = qpsk_map(bits)
+            syms_data = qpsk_map(bits)
+        # Добавляем пилот-поднесущую
+        syms = np.zeros(Nsub, dtype=complex)
+        data_idx = 0
+        for j in range(Nsub):
+            if j == pilot_idx:
+                continue
+            syms[j] = syms_data[data_idx]
+            data_idx += 1
         blocks.append(syms)
     return np.array(blocks)
 

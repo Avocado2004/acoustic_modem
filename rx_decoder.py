@@ -104,8 +104,10 @@ def _extract_pilot_symbols(pref_abs, f_err_loc, packet_idx=0):
           f"pos_12000_rms={pos_12000_rms:.6f} pos_22240_rms={pos_22240_rms:.6f} "
           f"pilot_rms={pilot_rms:.6f} pref_abs={pref_abs}")
     
-    # Эталонный пилотный символ: все поднесущие = (1+1j)/√2
+    # Эталонный пилотный символ: 48 поднесущих = (1+1j)/√2, пилот-поднесущая = (1+1j)/√2
+    pilot_idx = modem_config.PILOT_SUBC_INDEX
     S_pilot_ref = (1 + 1j) / np.sqrt(2) * np.ones(Nsub, dtype=complex)
+    # Пилот-поднесущая тоже передаёт (1+1j)/√2 в пилотных символах перед преамбулой
     
     Hk_sum = np.zeros(Nsub, dtype=complex)
     pilot_rms_sum = 0.0
@@ -181,19 +183,31 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         return None
     
     # Определяем параметры для конкретной модуляции
+    # Данные несут только DATA_SUBC_COUNT (48) поднесущих, одна зарезервирована под пилот
+    data_subc = modem_config.DATA_SUBC_COUNT  # 48
+    pilot_idx = modem_config.PILOT_SUBC_INDEX  # 24
     if modulation == "BPSK":
         bits_per_symbol = 1
         ofdm_symbols_per_block = 2  # 2 физических символа = 1 логический блок для BPSK
-        bits_per_ofdm_symbol = Nsub * bits_per_symbol  # 48 для BPSK
+        bits_per_ofdm_symbol = data_subc * bits_per_symbol  # 48 для BPSK
     else:  # QPSK
         bits_per_symbol = 2
         ofdm_symbols_per_block = 1  # 1 физический символ = 1 логический блок для QPSK
-        bits_per_ofdm_symbol = Nsub * bits_per_symbol  # 96 для QPSK
+        bits_per_ofdm_symbol = data_subc * bits_per_symbol  # 96 для QPSK
     
     try:
         # Оценка частотной ошибки и канала (общая для всех модуляций)
-        zc_seq_ideal = (np.exp(-1j * np.pi * 1 * np.arange(Nsub) * (np.arange(Nsub) + 1) / float(Nsub)))
-        zc_seq_ideal = zc_seq_ideal / np.sqrt(np.mean(np.abs(zc_seq_ideal)**2))
+        # ZC последовательность длиной DATA_SUBC_COUNT=48, размещена с пропуском пилот-поднесущей
+        zc_seq_data = (np.exp(-1j * np.pi * 1 * np.arange(data_subc) * (np.arange(data_subc) + 1) / float(data_subc)))
+        zc_seq_data = zc_seq_data / np.sqrt(np.mean(np.abs(zc_seq_data)**2))
+        # Создаём полную ZC последовательность длиной Nsub с пропуском пилот-поднесущей
+        zc_seq_ideal = np.zeros(Nsub, dtype=complex)
+        data_idx = 0
+        for i in range(Nsub):
+            if i == pilot_idx:
+                continue
+            zc_seq_ideal[i] = zc_seq_data[data_idx]
+            data_idx += 1
         S_zc_fd = np.zeros(Nfft, dtype=complex)
         S_zc_fd[subc_inds] = zc_seq_ideal
         S_zc_fd[-subc_inds] = np.conj(zc_seq_ideal)
@@ -232,7 +246,16 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
             R2t = R2t * np.exp(-1j * phi_est)
         
         S_ref = np.fft.fft(_rx_st.preamble_td[2*SYMBOL_LEN + Ncp : 2*SYMBOL_LEN + Ncp + Nfft]) / Nfft
-        Hk_est = (R1t[subc_inds] / S_ref[subc_inds] + R2t[subc_inds] / S_ref[subc_inds]) / 2
+        # Оценка канала Hk для всех 49 поднесущих
+        # Для пилот-поднесущей (S_ref ≈ 0) используем интерполяцию из соседних
+        Hk1 = R1t[subc_inds] / (S_ref[subc_inds] + 1e-12)
+        Hk2 = R2t[subc_inds] / (S_ref[subc_inds] + 1e-12)
+        Hk_est = (Hk1 + Hk2) / 2
+        # Для пилот-поднесущей: S_ref = 0, поэтому Hk ненадёжен — интерполируем
+        pilot_fd_bin = modem_config.PILOT_SUBC_FD_BIN
+        if np.abs(S_ref[pilot_fd_bin]) < 1e-6:
+            # Пилот-поднесущая в преамбуле = 0, интерполируем Hk из соседей
+            Hk_est[pilot_idx] = (Hk_est[max(0, pilot_idx-1)] + Hk_est[min(Nsub-1, pilot_idx+1)]) / 2
         Hk_mag_raw = np.median(np.abs(Hk_est)) if hasattr(np, 'median') else np.mean(np.abs(Hk_est))
         Hk_mag = np.clip(Hk_mag_raw, 1/2.0, None)
         Hk_s = Hk_mag * np.exp(1j*np.angle(Hk_est))
@@ -384,10 +407,15 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         
         try:
             F = np.fft.fft(useful_corr) / Nfft
-            R = F[subc_inds]
+            R_all = F[subc_inds]  # Все 49 поднесущих
             
-            # СИМВОЛ ДАННЫХ: применяем текущий Hk без обновления
-            subc = equalizer.apply_only(R)
+            # Эквалайзер работает со всеми 49 поднесущими (включая пилот)
+            subc_all = equalizer.apply_only(R_all)
+            
+            # Исключаем пилот-поднесущую (индекс PILOT_SUBC_INDEX) — она не несёт данных
+            data_indices = [i for i in range(Nsub) if i != pilot_idx]
+            subc = subc_all[data_indices]  # 48 поднесущих данных
+            
             data_count += 1
             
             # Сохраняем текущее состояние Hk в историю эквалайзера для водопадной диаграммы
@@ -404,11 +432,11 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
                     print(f"[EQ-WF] Ошибка обновления водопада: {e}")
             
             if modem_config.subc_phases is not None and np.any(modem_config.subc_phases != 0):
-                subc = subc * np.exp(-1j * modem_config.subc_phases)
+                subc = subc * np.exp(-1j * modem_config.subc_phases[data_indices])
             
             rx_syms_pkt_list.append(subc)
             
-            # Сохраняем символы для градиентного созвездия
+            # Сохраняем символы для градиентного созвездия (только данные, без пилота)
             _rx_st.rx_constellation_symbols.extend(subc)
             
             # Отладочный вывод амплитуды после эквалайзера

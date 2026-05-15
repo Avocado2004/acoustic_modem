@@ -68,9 +68,11 @@ class TestModemConfig:
         assert modem_config.Ncp == 128
     
     def test_subcarrier_count(self):
-        """Проверка количества поднесущих."""
+        """Проверка количества поднесущих (49 = 48 данных + 1 пилот)."""
         import modem_config
-        assert modem_config.Nsub == 48
+        assert modem_config.Nsub == 49
+        assert modem_config.DATA_SUBC_COUNT == 48
+        assert modem_config.PILOT_SUBC_INDEX == 24
     
     def test_symbol_length(self):
         """Проверка длины OFDM символа."""
@@ -84,25 +86,52 @@ class TestModemConfig:
         assert modem_config.rs is not None
     
     def test_make_subcarrier_phases_schroeder(self):
-        """Проверка генерации фаз методом Schroeder."""
+        """Проверка генерации фаз методом Schroeder для 49 поднесущих."""
         import modem_config
-        phases = modem_config.make_subcarrier_phases("schroeder", N=48)
-        assert len(phases) == 48
+        phases = modem_config.make_subcarrier_phases("schroeder", N=49)
+        assert len(phases) == 49
         assert np.all(phases >= 0)
         assert np.all(phases <= 2 * np.pi)
     
     def test_make_subcarrier_phases_random(self):
-        """Проверка генерации случайных фаз."""
+        """Проверка генерации случайных фаз для 49 поднесущих."""
         import modem_config
-        phases = modem_config.make_subcarrier_phases("random", N=48, seed=42)
-        assert len(phases) == 48
+        phases = modem_config.make_subcarrier_phases("random", N=49, seed=42)
+        assert len(phases) == 49
     
     def test_make_subcarrier_phases_zero(self):
-        """Проверка генерации нулевых фаз."""
+        """Проверка генерации нулевых фаз для 49 поднесущих."""
         import modem_config
-        phases = modem_config.make_subcarrier_phases(None, N=48)
-        assert len(phases) == 48
+        phases = modem_config.make_subcarrier_phases(None, N=49)
+        assert len(phases) == 49
         assert np.all(phases == 0)
+    
+    def test_pilot_subcarrier_config(self):
+        """Проверка конфигурации пилот-поднесущей."""
+        import modem_config
+        # Пилот-поднесущая на позиции 24 (25-я по счёту)
+        assert modem_config.PILOT_SUBC_INDEX == 24
+        # Всего 49 поднесущих: 48 данных + 1 пилот
+        assert modem_config.Nsub == 49
+        assert modem_config.DATA_SUBC_COUNT == 48
+        # FFT-бин пилот-поднесущей
+        assert modem_config.PILOT_SUBC_FD_BIN == modem_config.subc_inds[24]
+        # Частота пилот-поднесущей
+        pilot_freq = modem_config.PILOT_SUBC_FD_BIN * modem_config.df
+        assert pilot_freq > 0
+        assert pilot_freq < modem_config.fs / 2
+    
+    def test_bits_per_ofdm_symbol_with_pilot(self):
+        """Проверка что биты на OFDM символ считаются по DATA_SUBC_COUNT."""
+        import modem_config
+        # QPSK: 48 данных * 2 бита = 96 бит
+        modem_config.set_modulation("QPSK")
+        assert modem_config.BITS_PER_OFDM_SYMBOL == 96
+        # BPSK: 48 данных * 1 бит = 48 бит
+        modem_config.set_modulation("BPSK")
+        assert modem_config.BITS_PER_OFDM_SYMBOL == 48
+        # Восстанавливаем QPSK
+        modem_config.set_modulation("QPSK")
 
 
 # =============================================================================
@@ -594,6 +623,134 @@ class TestConstants:
         # Низкие частоты лучше проходят через динамик/микрофон
         assert f_low >= 180  # Минимум ~187.5 Гц (расширено вниз для лучшего прохождения)
         assert f_high <= modem_config.fs / 2  # Ниже частоты Найквиста
+
+
+# =============================================================================
+# Тесты OFDM символов и преамбулы с пилот-поднесущей
+# =============================================================================
+
+class TestOFDMWithPilotSubcarrier:
+    """Тесты OFDM символов и преамбулы с пилот-поднесущей."""
+    
+    def test_ofdm_symbol_data_pilot_qpsk(self):
+        """Проверка что в данных QPSK пилот-поднесущая = символ '00'."""
+        import modem_config
+        from modem_modulation import ofdm_symbol
+        modem_config.set_modulation("QPSK")
+        # Создаём символ с 49 поднесущими
+        data_syms = np.ones(modem_config.Nsub, dtype=complex)
+        td, fd = ofdm_symbol(data_syms, return_fd=True, is_preamble=False)
+        pilot_idx = modem_config.PILOT_SUBC_INDEX
+        # Пилот-поднесущая должна быть (1+1j)/√2 после нормализации
+        pilot_val = fd[pilot_idx]
+        expected = (1 + 1j) / np.sqrt(2)
+        # После нормализации амплитуда должна быть близка к 1
+        assert abs(abs(pilot_val) - 1.0) < 0.1, f"Pilot magnitude {abs(pilot_val)} != 1.0"
+        # Фаза должна быть π/4 (45°)
+        assert abs(np.angle(pilot_val) - np.pi/4) < 0.1, f"Pilot phase {np.angle(pilot_val)} != π/4"
+    
+    def test_ofdm_symbol_data_pilot_bpsk(self):
+        """Проверка что в данных BPSK пилот-поднесущая = символ '0' (+1)."""
+        import modem_config
+        from modem_modulation import ofdm_symbol
+        modem_config.set_modulation("BPSK")
+        data_syms = np.ones(modem_config.Nsub, dtype=complex)
+        td, fd = ofdm_symbol(data_syms, return_fd=True, is_preamble=False)
+        pilot_idx = modem_config.PILOT_SUBC_INDEX
+        pilot_val = fd[pilot_idx]
+        # BPSK символ "0" = +1 (действительное положительное число)
+        assert pilot_val.real > 0.5, f"BPSK pilot real part {pilot_val.real} should be > 0.5"
+        assert abs(pilot_val.imag) < 0.1, f"BPSK pilot imag part {pilot_val.imag} should be ~0"
+        # Восстанавливаем QPSK
+        modem_config.set_modulation("QPSK")
+    
+    def test_ofdm_symbol_preamble_pilot_is_zero(self):
+        """Проверка что в преамбуле пилот-поднесущая = 0 (тишина)."""
+        import modem_config
+        from modem_modulation import ofdm_symbol
+        data_syms = np.ones(modem_config.Nsub, dtype=complex)
+        td, fd = ofdm_symbol(data_syms, return_fd=True, is_preamble=True)
+        pilot_idx = modem_config.PILOT_SUBC_INDEX
+        # В преамбуле пилот-поднесущая = 0
+        assert abs(fd[pilot_idx]) < 1e-6, f"Preamble pilot should be 0, got {fd[pilot_idx]}"
+    
+    def test_preamble_pilot_subcarrier_is_zero(self):
+        """Проверка что в преамбуле пилот-поднесущая не передаётся."""
+        import modem_config
+        from modem_modulation import build_preamble
+        preamble = build_preamble()
+        # Преамбула = ZC + ZC + Pilot + Pilot (4 символа)
+        symbol_len = modem_config.SYMBOL_LEN
+        # Проверяем 3-й символ (первый Pilot)
+        pilot_sym_start = 2 * symbol_len
+        pilot_td = preamble[pilot_sym_start:pilot_sym_start + symbol_len]
+        # FFT пилотного символа
+        useful = pilot_td[modem_config.Ncp:]
+        R = np.fft.fft(useful) / modem_config.Nfft
+        pilot_fd_bin = modem_config.PILOT_SUBC_FD_BIN
+        # Пилот-поднесущая в преамбуле должна быть ≈ 0
+        assert abs(R[pilot_fd_bin]) < 0.1, f"Preamble pilot FD bin should be ~0, got {abs(R[pilot_fd_bin])}"
+    
+    def test_preamble_zc_uses_48_subcarriers(self):
+        """Проверка что ZC в преамбуле использует 48 поднесущих (пропуская пилот)."""
+        import modem_config
+        from modem_modulation import build_preamble
+        preamble = build_preamble()
+        symbol_len = modem_config.SYMBOL_LEN
+        # Первый символ — ZC
+        zc_td = preamble[:symbol_len]
+        useful = zc_td[modem_config.Ncp:]
+        R = np.fft.fft(useful) / modem_config.Nfft
+        pilot_fd_bin = modem_config.PILOT_SUBC_FD_BIN
+        # ZC не должен быть на пилот-поднесущей
+        assert abs(R[pilot_fd_bin]) < 0.1, f"ZC should not use pilot subcarrier"
+        # ZC должен быть на остальных поднесущих
+        data_subc_inds = [i for i in modem_config.subc_inds if i != pilot_fd_bin]
+        zc_energy = np.mean(np.abs(R[data_subc_inds])**2)
+        assert zc_energy > 0.005, f"ZC should have energy on data subcarriers, got {zc_energy}"
+    
+    def test_build_data_td_excludes_pilot(self):
+        """Проверка что build_data_td размещает данные только на 48 поднесущих."""
+        import modem_config
+        from modem_modulation import build_data_td, bytes_to_bits
+        # Генерируем тестовые биты (96 бит = 1 RS слово для QPSK)
+        test_bits = np.array([0, 1] * 48)
+        modem_config.set_modulation("QPSK")
+        td, n_symbols, fd_symbols = build_data_td(test_bits, collect_fd=True)
+        # Должен быть 1 OFDM символ (96 бит / 48 поднесущих * 2 бита = 1)
+        assert n_symbols == 1
+        # FD символы должны содержать 49 поднесущих
+        fd_array = np.array(fd_symbols).reshape(n_symbols, modem_config.Nsub)
+        assert fd_array.shape == (1, 49)
+        # Пилот-поднесущая должна быть символом "0"
+        pilot_idx = modem_config.PILOT_SUBC_INDEX
+        pilot_val = fd_array[0, pilot_idx]
+        assert abs(pilot_val) > 0.1, f"Pilot should have non-zero value in data"
+        # Восстанавливаем QPSK
+        modem_config.set_modulation("QPSK")
+    
+    def test_frequency_range_with_49_subcarriers(self):
+        """Проверка частотного диапазона с 49 поднесущими."""
+        import modem_config
+        df = modem_config.df
+        f_low = modem_config.k_low * df
+        f_high = modem_config.k_high * df
+        # 49 поднесущих: k_low=4, k_high=52
+        assert modem_config.k_low == 4
+        assert modem_config.k_high == 52
+        assert f_low == 375.0  # 4 * 93.75
+        assert f_high == 4875.0  # 52 * 93.75
+        assert f_high <= modem_config.fs / 2
+    
+    def test_schroeder_phases_49_subcarriers(self):
+        """Проверка Schroeder фаз для 49 поднесущих."""
+        import modem_config
+        phases = modem_config.make_subcarrier_phases("schroeder", N=49)
+        assert len(phases) == 49
+        # Schroeder: phases[k] = π * k * (k-1) / N
+        k = np.arange(49)
+        expected = np.mod(np.pi * k * (k - 1) / 49.0, 2 * np.pi)
+        np.testing.assert_array_almost_equal(phases, expected)
 
 
 if __name__ == "__main__":

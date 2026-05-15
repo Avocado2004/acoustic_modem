@@ -166,24 +166,26 @@ def _collect_tx_constellation_symbols(data_bytes, header_bytes, filename_bytes, 
         all_bits = interleave_bits(all_bits, block_size=modem_config.BITS_PER_OFDM_SYMBOL)
         
         # Модулируем биты в символы
-        n_sub = Nsub
+        # Данные несут только DATA_SUBC_COUNT (48) поднесущих, одна зарезервирована под пилот
+        n_data_subc = modem_config.DATA_SUBC_COUNT
+        pilot_idx = modem_config.PILOT_SUBC_INDEX
         
         if modulation == "BPSK":
-            # BPSK: 1 бит на поднесущую
-            for i in range(0, len(all_bits), n_sub):
-                bits_chunk = all_bits[i:i+n_sub]
-                if len(bits_chunk) < n_sub:
-                    bits_chunk = np.concatenate([bits_chunk, np.zeros(n_sub - len(bits_chunk), dtype=int)])
+            # BPSK: 1 бит на поднесущую, 48 поднесущих данных
+            for i in range(0, len(all_bits), n_data_subc):
+                bits_chunk = all_bits[i:i+n_data_subc]
+                if len(bits_chunk) < n_data_subc:
+                    bits_chunk = np.concatenate([bits_chunk, np.zeros(n_data_subc - len(bits_chunk), dtype=int)])
                 
                 # BPSK модуляция: 0 -> +1, 1 -> -1
                 symbols = 1 - 2 * bits_chunk.astype(complex)
                 constellation_symbols.extend(symbols)
         else:
-            # QPSK: 2 бита на поднесущую
-            for i in range(0, len(all_bits), n_sub * 2):
-                bits_chunk = all_bits[i:i+n_sub*2]
-                if len(bits_chunk) < n_sub * 2:
-                    bits_chunk = np.concatenate([bits_chunk, np.zeros(n_sub * 2 - len(bits_chunk), dtype=int)])
+            # QPSK: 2 бита на поднесущую, 48 поднесущих данных
+            for i in range(0, len(all_bits), n_data_subc * 2):
+                bits_chunk = all_bits[i:i+n_data_subc*2]
+                if len(bits_chunk) < n_data_subc * 2:
+                    bits_chunk = np.concatenate([bits_chunk, np.zeros(n_data_subc * 2 - len(bits_chunk), dtype=int)])
                 
                 # QPSK модуляция
                 symbols = []
@@ -259,9 +261,18 @@ def _collect_tx_ofdm_constellation_symbols(data_bytes, header_bytes, filename_by
         # Вызываем build_data_td с collect_fd=True для сбора FD символов
         if len(all_bits) > 0:
             _, n_symbols, fd_symbols = build_data_td(all_bits, collect_fd=True)
-            ofdm_constellation_symbols = list(fd_symbols)
+            # Исключаем пилот-поднесущую (индекс PILOT_SUBC_INDEX) из созвездия
+            pilot_idx = modem_config.PILOT_SUBC_INDEX
+            data_indices = [i for i in range(Nsub) if i != pilot_idx]
+            # fd_symbols — плоский массив всех поднесущих всех символов
+            # Перестраиваем: каждый OFDM символ имеет Nsub поднесущих
+            n_total_symbols = n_symbols
+            fd_array = np.array(fd_symbols).reshape(n_total_symbols, Nsub)
+            fd_data_only = fd_array[:, data_indices].flatten()
+            ofdm_constellation_symbols = list(fd_data_only)
             print(f"[TX-OFDM-CONSTELLATION] Collected {len(ofdm_constellation_symbols)} FD symbols "
-                  f"from {n_symbols} OFDM symbols (modulation={modem_config.MODULATION})")
+                  f"from {n_symbols} OFDM symbols (modulation={modem_config.MODULATION}, "
+                  f"excluded pilot subcarrier {pilot_idx})")
         else:
             print("[TX-OFDM-CONSTELLATION] No bits to process")
         
@@ -277,7 +288,7 @@ def _generate_pilot_symbols(n_symbols):
     """
     Генерация пилотных OFDM символов для настройки эквалайзера и AGC приёмника.
     
-    Пилотный символ: все поднесущие = (1+1j)/√2 (как в преамбуле).
+    Пилотный символ: 48 поднесущих данных = (1+1j)/√2, пилот-поднесущая = символ "0".
     Это позволяет приёмнику:
     1. Получить точную оценку канала Hk по 16 пилотам (вместо 2 в преамбуле)
     2. Плавно настроить AGC на известном сигнале
@@ -298,19 +309,17 @@ def _generate_pilot_symbols(n_symbols):
     
     pilot_samples = []
     
-    # Пилотный символ: все поднесущие = (1+1j)/√2
+    # Пилотный символ: все 49 поднесущих = (1+1j)/√2
+    # ofdm_symbol() автоматически установит пилот-поднесущую (индекс PILOT_SUBC_INDEX)
+    # в символ "0" для текущей модуляции (QPSK: (1+1j)/√2, BPSK: +1)
     pilot_syms = (1 + 1j) / np.sqrt(2) * np.ones(Nsub, dtype=complex)
     
-    # Нормализуем к целевому RMS
-    cur_rms = np.sqrt(np.mean(np.abs(pilot_syms)**2))
-    if cur_rms > 0:
-        pilot_syms = pilot_syms / cur_rms * SYMBOL_TX_TARGET
-    
-    print(f"[TX-PILOT] Pilot symbol: all subcarriers = (1+1j)/√2, RMS={cur_rms:.4f}, target={SYMBOL_TX_TARGET}")
+    print(f"[TX-PILOT] Pilot symbol: {Nsub} subcarriers = (1+1j)/√2, "
+          f"pilot subcarrier index={modem_config.PILOT_SUBC_INDEX}")
     
     for i in range(n_symbols):
         # Используем ofdm_symbol() для генерации временного сигнала
-        # ofdm_symbol() уже включает CP, поэтому добавляем x напрямую
+        # ofdm_symbol() уже включает CP, нормализацию и установку пилот-поднесущей
         x = ofdm_symbol(pilot_syms)
         pilot_samples.append(x)
     
