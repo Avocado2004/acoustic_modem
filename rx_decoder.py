@@ -10,7 +10,7 @@ from modem_config import (Nfft, Ncp, Nsub, subc_inds, fs, SYMBOL_LEN, DEFAULT_PA
                            RS_CW_BITS, RS_DATA_BYTES,
                            RS_CW_BYTES, rs, SYMBOL_TARGET_RMS, AGC_ALPHA, AGC_DEBUG, MIN_RMS,
                            PLOTTING_AVAILABLE, _MAX_RS_FAIL_PRINTS_GLOBAL, SYNC_WINDOW_HALF,
-                           PREAMBLE_PILOT_SYMBOLS, PILOT_INTERVAL)
+                           PREAMBLE_PILOT_SYMBOLS)
 
 from modem_modulation import (qpsk_demap, bpsk_demap, ofdm_symbol, build_preamble, bytes_to_bits, bits_to_bytes,
                            sync_by_corr, deinterleave_bits, AdaptiveEqualizer)
@@ -316,31 +316,20 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
     except Exception:
         packet_gain = 1.0
     
-    # Переводим логические блоки в физические символы (данные)
+    # Переводим логические блоки в физические символы данных
     data_symbols_expected = packet_blocks_expected * ofdm_symbols_per_block
     
-    # Вычисляем общее количество символов (данные + пилоты)
-    # Пилоты вставляются через каждые PILOT_INTERVAL символов данных
-    n_data_pilots = data_symbols_expected // PILOT_INTERVAL if PILOT_INTERVAL > 0 else 0
-    total_symbols_expected = data_symbols_expected + n_data_pilots
-    
-    print(f"[RX-DATA-PILOTS] data_symbols={data_symbols_expected}, pilots={n_data_pilots}, total={total_symbols_expected}")
-    
-    # Эталонный пилотный символ для обновления эквалайзера (все поднесущие = (1+1j)/√2)
-    S_pilot_ref = (1 + 1j) / np.sqrt(2) * np.ones(Nsub, dtype=complex)
-    
     pkt_data_start = pref_abs + len(_rx_st.preamble_td)
-    pkt_payload_samples = total_symbols_expected * SYMBOL_LEN
+    pkt_payload_samples = data_symbols_expected * SYMBOL_LEN
     seg = packet_gain * _rx_st.rx[pkt_data_start : pkt_data_start + pkt_payload_samples]
     if len(seg) < pkt_payload_samples:
         return None
-    frames = seg.reshape(total_symbols_expected, SYMBOL_LEN)
+    frames = seg.reshape(data_symbols_expected, SYMBOL_LEN)
     
     rx_syms_pkt_list = []
     
-    # Счётчики для отладки
+    # Счётчик для отладки
     clipped_gain_count = 0  # Количество символов с clipped gain_sym
-    pilot_count = 0  # Счётчик пилотных символов
     data_count = 0  # Счётчик символов данных
     
     for idxf, fr in enumerate(frames):
@@ -365,26 +354,11 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         if gain_sym != gain_sym_raw:
             clipped_gain_count += 1
         
-        # === Определяем, является ли текущий символ пилотом ===
-        # Пилоты идут на позициях: PILOT_INTERVAL, 2*PILOT_INTERVAL+1, 3*PILOT_INTERVAL+2, ...
-        # Формула: (idxf + 1) % (PILOT_INTERVAL + 1) == 0
-        is_pilot = (PILOT_INTERVAL > 0 and
-                    (idxf + 1) % (PILOT_INTERVAL + 1) == 0 and
-                    idxf < total_symbols_expected - 1)  # не последний символ
-        
-        # === Расширенный отладочный вывод для первых символов ===
-        if AGC_DEBUG:
-            if not is_pilot and data_count < 5:
-                # Для первых 5 символов данных: RMS до AGC, gain_sym, RMS после AGC
-                print(f"[AGC-DATA] pkt={packet_idx} frame={idxf} data_idx={data_count} "
-                      f"rms_before={cur_rms_before_agc:.6f} est_rms={est_rms:.6f} "
-                      f"gain_sym={gain_sym:.3f} (raw={gain_sym_raw:.3f})")
-            elif is_pilot and pilot_count < 5:
-                # Для первых 5 пилотов: RMS, ожидаемый уровень
-                expected_rms = SYMBOL_TARGET_RMS  # Ожидаемый RMS пилота
-                print(f"[AGC-PILOT] pkt={packet_idx} frame={idxf} pilot_idx={pilot_count} "
-                      f"rms_before={cur_rms_before_agc:.6f} expected_rms={expected_rms:.6f} "
-                      f"ratio={cur_rms_before_agc/expected_rms if expected_rms > 0 else 0:.3f}")
+        # === Отладочный вывод для первых символов ===
+        if AGC_DEBUG and data_count < 5:
+            print(f"[AGC-DATA] pkt={packet_idx} frame={idxf} data_idx={data_count} "
+                  f"rms_before={cur_rms_before_agc:.6f} est_rms={est_rms:.6f} "
+                  f"gain_sym={gain_sym:.3f} (raw={gain_sym_raw:.3f})")
         
         # Сохраняем данные AGC для последующего построения графика
         _rx_st.agc_history_list.append({
@@ -394,20 +368,16 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
             'cur_rms': cur_rms_before_agc,
             'est_rms': est_rms,
             'gain_sym': gain_sym,
-            'is_pilot': is_pilot
         })
         _rx_st._global_symbol_counter += 1
         
         useful = useful * gain_sym
         
-        # === Вычисление RMS после AGC ===
-        cur_rms_after_agc = np.sqrt(np.mean(np.abs(useful)**2)) if useful.size > 0 else 1e-12
-        
         # Отладочный вывод RMS после AGC для первых символов
-        if AGC_DEBUG:
-            if not is_pilot and data_count < 5:
-                print(f"[AGC-DATA-AFTER] pkt={packet_idx} frame={idxf} data_idx={data_count} "
-                      f"rms_after={cur_rms_after_agc:.6f} target={SYMBOL_TARGET_RMS}")
+        if AGC_DEBUG and data_count < 5:
+            cur_rms_after_agc = np.sqrt(np.mean(np.abs(useful)**2)) if useful.size > 0 else 1e-12
+            print(f"[AGC-DATA-AFTER] pkt={packet_idx} frame={idxf} data_idx={data_count} "
+                  f"rms_after={cur_rms_after_agc:.6f} target={SYMBOL_TARGET_RMS}")
         
         # Применяем AGC-усиление к сигналу с компенсацией частотного сдвига
         useful_corr = useful * np.exp(-1j * 2.0 * np.pi * f_err_loc * tv)
@@ -416,60 +386,47 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
             F = np.fft.fft(useful_corr) / Nfft
             R = F[subc_inds]
             
-            if is_pilot:
-                # ПИЛОТНЫЙ СИМВОЛ: обновляем Hk эквалайзера по известному эталону
-                equalizer.update_from_pilot(R, S_pilot_ref)
-                pilot_count += 1
-                
-                # Пилот НЕ добавляется в выходной поток данных
-                if AGC_DEBUG and pilot_count <= 5:
-                    Hk = equalizer.get_current_Hk()
-                    print(f"[RX-PILOT-DATA] pkt={packet_idx} pilot at frame={idxf} "
-                          f"Hk_avg_mag={np.mean(np.abs(Hk)):.4f} "
-                          f"Hk_avg_phase={np.mean(np.angle(Hk)):.4f} rad")
-            else:
-                # СИМВОЛ ДАННЫХ: применяем текущий Hk без обновления
-                subc = equalizer.apply_only(R)
-                data_count += 1
-                
-                # Сохраняем текущее состояние Hk в историю эквалайзера для водопадной диаграммы
+            # СИМВОЛ ДАННЫХ: применяем текущий Hk без обновления
+            subc = equalizer.apply_only(R)
+            data_count += 1
+            
+            # Сохраняем текущее состояние Hk в историю эквалайзера для водопадной диаграммы
+            try:
+                _rx_st.equalizer_history_list.append(equalizer.get_current_Hk().copy())
+            except Exception as e:
+                print(f"[EQ-HIST] Ошибка сохранения Hk: {e}")
+            
+            # Обновляем водопадную диаграмму эквалайзера (если включена)
+            if waterfall is not None:
                 try:
-                    _rx_st.equalizer_history_list.append(equalizer.get_current_Hk().copy())
+                    waterfall.update(equalizer.get_current_Hk())
                 except Exception as e:
-                    print(f"[EQ-HIST] Ошибка сохранения Hk: {e}")
-                
-                # Обновляем водопадную диаграмму эквалайзера (если включена)
-                if waterfall is not None:
-                    try:
-                        waterfall.update(equalizer.get_current_Hk())
-                    except Exception as e:
-                        print(f"[EQ-WF] Ошибка обновления водопада: {e}")
-                
-                if modem_config.subc_phases is not None and np.any(modem_config.subc_phases != 0):
-                    subc = subc * np.exp(-1j * modem_config.subc_phases)
-                
-                rx_syms_pkt_list.append(subc)
-                
-                # Сохраняем символы для градиентного созвездия
-                _rx_st.rx_constellation_symbols.extend(subc)
-                
-                # Отладочный вывод амплитуды после эквалайзера
-                if AGC_DEBUG and data_count <= 5:
-                    print(f"[EQ-OUT] pkt={packet_idx} frame={idxf} data_idx={data_count-1} "
-                          f"subc_rms={np.sqrt(np.mean(np.abs(subc)**2)):.6f} "
-                          f"subc_max={np.max(np.abs(subc)):.6f} "
-                          f"subc_mean_real={np.mean(np.real(subc)):.4f} "
-                          f"subc_mean_imag={np.mean(np.imag(subc)):.4f}")
+                    print(f"[EQ-WF] Ошибка обновления водопада: {e}")
+            
+            if modem_config.subc_phases is not None and np.any(modem_config.subc_phases != 0):
+                subc = subc * np.exp(-1j * modem_config.subc_phases)
+            
+            rx_syms_pkt_list.append(subc)
+            
+            # Сохраняем символы для градиентного созвездия
+            _rx_st.rx_constellation_symbols.extend(subc)
+            
+            # Отладочный вывод амплитуды после эквалайзера
+            if AGC_DEBUG and data_count <= 5:
+                print(f"[EQ-OUT] pkt={packet_idx} frame={idxf} data_idx={data_count-1} "
+                      f"subc_rms={np.sqrt(np.mean(np.abs(subc)**2)):.6f} "
+                      f"subc_max={np.max(np.abs(subc)):.6f} "
+                      f"subc_mean_real={np.mean(np.real(subc)):.4f} "
+                      f"subc_mean_imag={np.mean(np.imag(subc)):.4f}")
         except Exception as e:
-            print(f"[RX-ERR] Exception at frame={idxf} is_pilot={is_pilot}: {e}")
-            if not is_pilot:
-                subc = np.zeros(Nsub, dtype=complex)
-                rx_syms_pkt_list.append(subc)
-                data_count += 1
+            print(f"[RX-ERR] Exception at frame={idxf}: {e}")
+            subc = np.zeros(Nsub, dtype=complex)
+            rx_syms_pkt_list.append(subc)
+            data_count += 1
     
     # === Итоговая статистика по пакету ===
     print(f"[RX-STATS] pkt={packet_idx} total_frames={len(frames)} "
-          f"data_symbols={data_count} pilot_symbols={pilot_count} "
+          f"data_symbols={data_count} "
           f"clipped_gain={clipped_gain_count}/{len(frames)} "
           f"rx_syms_list_len={len(rx_syms_pkt_list)}")
     

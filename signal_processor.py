@@ -529,15 +529,11 @@ def _process_legacy_interface(data_source, preamble_td_local, config, pre_len, s
         # Используем максимальное значение (BPSK) чтобы гарантировать достаточно данных
         # для любой модуляции (модуляция определится после декодирования первого пакета)
         physical_symbols_guess = packet_blocks_guess * 2  # максимум для BPSK (данные)
-        # Учитываем пилоты внутри данных: каждый PILOT_INTERVAL символов вставляется пилот
-        # Для BPSK: 150 данных + 150//10 = 15 пилотов = 165 символов
-        pilot_symbols_guess = physical_symbols_guess // modem_config.PILOT_INTERVAL if modem_config.PILOT_INTERVAL > 0 else 0
-        total_symbols_with_pilots = physical_symbols_guess + pilot_symbols_guess
         # Добавляем запас для пилотов перед преамбулой (PREAMBLE_PILOT_SYMBOLS)
         # и для самой преамбулы (pre_len)
         preamble_pilot_samples = modem_config.PREAMBLE_PILOT_SYMBOLS * SYMBOL_LEN
         needed_total = (refined_abs + preamble_pilot_samples + pre_len +
-                        total_symbols_with_pilots * SYMBOL_LEN + SYMBOL_LEN)
+                        physical_symbols_guess * SYMBOL_LEN + SYMBOL_LEN)
 
         print(f"[SP-SEARCH] refined_abs={refined_abs}, needed_total={needed_total}, "
               f"packet_blocks_guess={packet_blocks_guess}, "
@@ -698,16 +694,13 @@ def _process_legacy_interface(data_source, preamble_td_local, config, pre_len, s
             # позиция преамбулы + длина преамбулы + все данные пакета + запас
             # Для последующих пакетов пилотов перед преамбулой нет
             physical_symbols_val = packet_blocks_val * modem_config.OFDM_SYMBOLS_PER_BLOCK
-            # Учитываем пилоты внутри данных
-            pilot_symbols_val = physical_symbols_val // modem_config.PILOT_INTERVAL if modem_config.PILOT_INTERVAL > 0 else 0
-            total_symbols_val = physical_symbols_val + pilot_symbols_val
-            # Размер пакета: преамбула + данные (с пилотами) + зазор
-            packet_samples = pre_len + total_symbols_val * SYMBOL_LEN + SYMBOL_LEN  # SYMBOL_LEN как зазор
+            # Размер пакета: преамбула + данные + зазор
+            packet_samples = pre_len + physical_symbols_val * SYMBOL_LEN + SYMBOL_LEN  # SYMBOL_LEN как зазор
             needed_for_full_packet = pref + packet_samples
 
             print(f"[SP-PKT{pkt_idx}] need {needed_for_full_packet} samples for full packet "
                   f"(pref={pref}, packet_samples={packet_samples}, "
-                  f"physical_symbols={physical_symbols_val}, pilots={pilot_symbols_val})")
+                  f"physical_symbols={physical_symbols_val})")
 
             # Ждём, пока буфер содержит достаточно данных для всего пакета
             if not data_source.wait_for_samples(needed_for_full_packet, timeout=20.0):
@@ -953,13 +946,10 @@ def _process_chunk_interface(data_source, preamble_td_local, config, pre_len, sl
         # Используем максимальное значение (BPSK) чтобы гарантировать достаточно данных
         # для любой модуляции (модуляция определится после декодирования первого пакета)
         physical_symbols_guess = packet_blocks_guess * 2  # максимум для BPSK (данные)
-        # Учитываем пилоты внутри данных
-        pilot_symbols_guess = physical_symbols_guess // modem_config.PILOT_INTERVAL if modem_config.PILOT_INTERVAL > 0 else 0
-        total_symbols_with_pilots = physical_symbols_guess + pilot_symbols_guess
         # Добавляем запас для пилотов перед преамбулой
         preamble_pilot_samples = modem_config.PREAMBLE_PILOT_SYMBOLS * SYMBOL_LEN
         needed_total = (refined_abs + preamble_pilot_samples + pre_len +
-                        total_symbols_with_pilots * SYMBOL_LEN + SYMBOL_LEN)
+                        physical_symbols_guess * SYMBOL_LEN + SYMBOL_LEN)
 
         print(f"[SP-SEARCH] refined_abs={refined_abs}, needed_total={needed_total}, "
               f"packet_blocks_guess={packet_blocks_guess}, "
@@ -1124,13 +1114,10 @@ def _process_chunk_interface(data_source, preamble_td_local, config, pre_len, sl
             # Вычисляем сколько данных нужно для этого пакета
             pref_backoff = max(0, pref - SYMBOL_LEN)
             physical_symbols_val = packet_blocks_val * modem_config.OFDM_SYMBOLS_PER_BLOCK
-            # Учитываем пилоты внутри данных
-            pilot_symbols_val = physical_symbols_val // modem_config.PILOT_INTERVAL if modem_config.PILOT_INTERVAL > 0 else 0
-            total_symbols_val = physical_symbols_val + pilot_symbols_val
             # Добавляем запас для пилотов перед преамбулой
             preamble_pilot_samples = modem_config.PREAMBLE_PILOT_SYMBOLS * SYMBOL_LEN
             needed_for_pkt = (pref_backoff + preamble_pilot_samples + SYMBOL_LEN + pre_len +
-                              total_symbols_val * SYMBOL_LEN + SYMBOL_LEN)
+                              physical_symbols_val * SYMBOL_LEN + SYMBOL_LEN)
 
             # Накопляем данные если нужно
             if total_samples < needed_for_pkt:
