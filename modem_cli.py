@@ -12,7 +12,7 @@ import numpy as np
 import importlib
 
 # Импортируем функции из других модулей
-from modem_config import init_phases, fs, wavfile, MODULATION, Nfft, Ncp, Nsub, BITS_PER_SYMBOL
+from modem_config import init_phases, fs, wavfile, MODULATION, Nfft, Ncp, Nsub, BITS_PER_SYMBOL, set_modulation
 from modem_modulation import build_preamble
 from modem_tx import transmit_text, transmit_file, _transmit_data
 from signal_processor import receive_from_file
@@ -255,18 +255,19 @@ def run_transmit():
     mode = input("Режим передачи — [F]ile или [T]ext (по умолчанию F): ").strip().upper()
     mode = "T" if mode == "T" else "F"
     
-    # НОВОЕ: Выбор модуляции
-    mod = input("Модуляция — [B]PSK или [Q]PSK (по умолчанию Q): ").strip().upper()
-    modulation = "BPSK" if mod == "B" else "QPSK"
+    # Выбор модуляции
+    print("Выберите модуляцию:")
+    print("  1. DBPSK (1 бит, дифференциальная)")
+    print("  2. DQPSK (2 бита, дифференциальная, по умолчанию)")
+    mod = input("Ваш выбор (1/2, по умолчанию 2): ").strip()
+    
+    if mod == "1":
+        modulation = "DBPSK"
+    else:
+        modulation = "DQPSK"
     
     # Устанавливаем глобальные настройки модуляции
-    import modem_config
-    modem_config.MODULATION = modulation
-    if modulation == "BPSK":
-        modem_config.BITS_PER_SYMBOL = 1
-    else:
-        modem_config.BITS_PER_SYMBOL = 2
-    modem_config.BITS_PER_OFDM_SYMBOL = modem_config.Nsub * modem_config.BITS_PER_SYMBOL
+    set_modulation(modulation)
     
     print(f"[TX] Используется модуляция: {modulation}")
     
@@ -298,23 +299,22 @@ def run_loop():
     
     # Запрос типа модуляции
     print("\n[LOOP] Выберите тип модуляции:")
-    print("  1. BPSK (1 бит на символ)")
-    print("  2. QPSK (2 бита на символ, по умолчанию)")
+    print("  1. DBPSK (1 бит на символ, дифференциальная)")
+    print("  2. DQPSK (2 бита на символ, дифференциальная, по умолчанию)")
     modulation_input = input("Ваш выбор (1/2, по умолчанию 2): ").strip()
     
     if modulation_input == '1':
-        modulation_type = "BPSK"
+        modulation_type = "DBPSK"
     else:
-        modulation_type = "QPSK"  # QPSK по умолчанию
+        modulation_type = "DQPSK"
     
     print(f"[LOOP] Выбрана модуляция: {modulation_type}")
     
     # Применяем выбранную модуляцию
-    from modem_config import set_modulation
     success = set_modulation(modulation_type)
     if not success:
-        print("[LOOP-ERR] Ошибка при установке модуляции. Используется QPSK по умолчанию.")
-        set_modulation("QPSK")
+        print("[LOOP-ERR] Ошибка при установке модуляции. Используется DQPSK по умолчанию.")
+        set_modulation("DQPSK")
     
     # Обновляем локальные ссылки на параметры конфигурации
     from modem_config import init_phases, fs, wavfile, MODULATION, Nfft, Ncp, Nsub, BITS_PER_SYMBOL

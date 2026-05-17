@@ -58,27 +58,32 @@ MAX_PAYLOAD_SIZE = 1 << 30
 # PHASE METHOD
 PHASE_METHOD = "schroeder"
 
-# Modulation type: "QPSK" or "BPSK"
-MODULATION = "QPSK"  # Default QPSK for backward compatibility
+# Modulation type: "DQPSK" or "DBPSK"
+# DQPSK - дифференциальная QPSK (2 бита/поднесущую)
+# DBPSK - дифференциальная BPSK (1 бит/поднесущую)
+MODULATION = "DQPSK"  # По умолчанию DQPSK (дифференциальная, без эквалайзера)
 
 # Количество физических OFDM символов, составляющих один логический блок.
 # Логический блок всегда несет 96 бит (одно RS кодовое слово).
 # Из Nsub поднесущих (49) одна (индекс PILOT_SUBC_INDEX) зарезервирована под пилот,
 # поэтому для данных доступно (Nsub - 1) = 48 поднесущих.
-# QPSK: 48 данных * 2 бита = 96 бит -> OFDM_SYMBOLS_PER_BLOCK = 1
-# BPSK: 48 данных * 1 бит = 48 бит -> OFDM_SYMBOLS_PER_BLOCK = 2 (96 бит)
-OFDM_SYMBOLS_PER_BLOCK = 1  # По умолчанию для QPSK
+# QPSK/DQPSK: 48 данных * 2 бита = 96 бит -> OFDM_SYMBOLS_PER_BLOCK = 1
+# BPSK/DBPSK: 48 данных * 1 бит = 48 бит -> OFDM_SYMBOLS_PER_BLOCK = 2 (96 бит)
+OFDM_SYMBOLS_PER_BLOCK = 1  # По умолчанию для QPSK/DQPSK
 
 # Количество поднесущих, несущих данные (исключая пилот-поднесущую)
 DATA_SUBC_COUNT = Nsub - 1  # 48 поднесущих данных
 
 # BITS_PER_OFDM_SYMBOL is now dynamic based on modulation
-if MODULATION == "BPSK":
-    BITS_PER_SYMBOL = 1  # BPSK: 1 bit per subcarrier
+if MODULATION == "DBPSK":
+    BITS_PER_SYMBOL = 1  # DBPSK: 1 bit per subcarrier
 else:
-    BITS_PER_SYMBOL = 2  # QPSK: 2 bits per subcarrier
+    BITS_PER_SYMBOL = 2  # DQPSK: 2 bits per subcarrier
 # Бит на OFDM символ = только данные поднесущие (без пилот)
 BITS_PER_OFDM_SYMBOL = DATA_SUBC_COUNT * BITS_PER_SYMBOL
+
+# Флаг дифференциальной модуляции
+IS_DIFFERENTIAL = MODULATION in ("DQPSK", "DBPSK")
 
 # Check compatibility: BITS_PER_OFDM_SYMBOL should equal RS_CW_BITS for 1 RS cw per OFDM symbol
 if BITS_PER_OFDM_SYMBOL != RS_CW_BITS:
@@ -92,30 +97,31 @@ def set_modulation(modulation_type):
     Динамически устанавливает тип модуляции и обновляет все зависимые параметры.
     
     Параметры:
-    - modulation_type: строка "BPSK" или "QPSK"
+    - modulation_type: строка "BPSK", "QPSK", "DQPSK" или "DBPSK"
     
     Возвращает:
     - True если модуляция успешно изменена, False если тип не поддерживается
     """
-    global MODULATION, BITS_PER_SYMBOL, BITS_PER_OFDM_SYMBOL, OFDM_SYMBOLS_PER_BLOCK
+    global MODULATION, BITS_PER_SYMBOL, BITS_PER_OFDM_SYMBOL, OFDM_SYMBOLS_PER_BLOCK, IS_DIFFERENTIAL
     
     modulation_type = modulation_type.upper()
-    if modulation_type not in ["BPSK", "QPSK"]:
-        print(f"[CFG-ERR] Неизвестный тип модуляции: {modulation_type}. Используйте 'BPSK' или 'QPSK'.")
+    if modulation_type not in ["DQPSK", "DBPSK"]:
+        print(f"[CFG-ERR] Неизвестный тип модуляции: {modulation_type}. Используйте 'DQPSK' или 'DBPSK'.")
         return False
     
     MODULATION = modulation_type
+    IS_DIFFERENTIAL = MODULATION in ("DQPSK", "DBPSK")
     
-    if MODULATION == "BPSK":
-        BITS_PER_SYMBOL = 1  # BPSK: 1 bit per subcarrier
-        OFDM_SYMBOLS_PER_BLOCK = 2  # 2 символа BPSK = 1 логический блок (96 бит)
+    if MODULATION == "DBPSK":
+        BITS_PER_SYMBOL = 1  # DBPSK: 1 bit per subcarrier
+        OFDM_SYMBOLS_PER_BLOCK = 2  # 2 символа DBPSK = 1 логический блок (96 бит)
     else:
-        BITS_PER_SYMBOL = 2  # QPSK: 2 bits per subcarrier
-        OFDM_SYMBOLS_PER_BLOCK = 1  # 1 символ QPSK = 1 логический блок (96 бит)
+        BITS_PER_SYMBOL = 2  # DQPSK: 2 bits per subcarrier
+        OFDM_SYMBOLS_PER_BLOCK = 1  # 1 символ DQPSK = 1 логический блок (96 бит)
     
     BITS_PER_OFDM_SYMBOL = DATA_SUBC_COUNT * BITS_PER_SYMBOL
     
-    print(f"[CFG] Модуляция изменена на {MODULATION}: BITS_PER_SYMBOL={BITS_PER_SYMBOL}, BITS_PER_OFDM_SYMBOL={BITS_PER_OFDM_SYMBOL}, OFDM_SYMBOLS_PER_BLOCK={OFDM_SYMBOLS_PER_BLOCK}")
+    print(f"[CFG] Модуляция изменена на {MODULATION}: BITS_PER_SYMBOL={BITS_PER_SYMBOL}, BITS_PER_OFDM_SYMBOL={BITS_PER_OFDM_SYMBOL}, OFDM_SYMBOLS_PER_BLOCK={OFDM_SYMBOLS_PER_BLOCK}, IS_DIFFERENTIAL={IS_DIFFERENTIAL}")
     
     # Проверка совместимости с RS кодом
     if BITS_PER_OFDM_SYMBOL != RS_CW_BITS:

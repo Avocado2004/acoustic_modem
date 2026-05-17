@@ -13,7 +13,8 @@ from modem_config import (Nfft, Ncp, Nsub, subc_inds, fs, SYMBOL_LEN, DEFAULT_PA
                            PREAMBLE_PILOT_SYMBOLS)
 
 from modem_modulation import (qpsk_demap, bpsk_demap, ofdm_symbol, build_preamble, bytes_to_bits, bits_to_bytes,
-                           sync_by_corr, deinterleave_bits, AdaptiveEqualizer)
+                           sync_by_corr, deinterleave_bits, AdaptiveEqualizer,
+                           dqpsk_demap, dbpsk_demap, get_diff_order)
 
 from modem_packet import parse_header, build_header, make_packet_header_bytes, simulate_packet_positions
 
@@ -186,11 +187,11 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
     # Данные несут только DATA_SUBC_COUNT (48) поднесущих, одна зарезервирована под пилот
     data_subc = modem_config.DATA_SUBC_COUNT  # 48
     pilot_idx = modem_config.PILOT_SUBC_INDEX  # 24
-    if modulation == "BPSK":
+    if modulation in ("BPSK", "DBPSK"):
         bits_per_symbol = 1
         ofdm_symbols_per_block = 2  # 2 физических символа = 1 логический блок для BPSK
         bits_per_ofdm_symbol = data_subc * bits_per_symbol  # 48 для BPSK
-    else:  # QPSK
+    else:  # DQPSK
         bits_per_symbol = 2
         ofdm_symbols_per_block = 1  # 1 физический символ = 1 логический блок для QPSK
         bits_per_ofdm_symbol = data_subc * bits_per_symbol  # 96 для QPSK
@@ -483,7 +484,49 @@ def _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, by
         rx_syms_pkt = rx_syms_pkt * np.exp(-1j * phi_est)
     
     # Демаппинг в зависимости от модуляции
-    if modulation == "BPSK":
+    # Для дифференциальной модуляции (DQPSK/DBPSK) используем специальный демаппинг
+    if modem_config.IS_DIFFERENTIAL:
+        # Получаем порядок поднесущих для дифференциального декодирования
+        diff_order = get_diff_order()
+        
+        # Создаём маппинг: индекс поднесущей -> позиция в массиве данных (0-47)
+        pilot_idx = modem_config.PILOT_SUBC_INDEX
+        data_indices = [i for i in range(Nsub) if i != pilot_idx]
+        subc_to_data_idx = {}
+        for data_idx, subc_idx in enumerate(data_indices):
+            subc_to_data_idx[subc_idx] = data_idx
+        
+        # Группируем символы по OFDM символам (48 поднесущих данных в каждом)
+        n_ofdm_symbols = len(rx_syms_pkt) // data_subc
+        rx_syms_reshaped = rx_syms_pkt[:n_ofdm_symbols * data_subc].reshape(n_ofdm_symbols, data_subc)
+        
+        bits_list = []
+        for sym_idx in range(n_ofdm_symbols):
+            # Для каждого OFDM символа декодируем данные
+            syms_data = rx_syms_reshaped[sym_idx]
+            
+            # Переупорядочиваем символы в порядке diff_order
+            syms_ordered = []
+            for subc_idx in diff_order:
+                data_idx = subc_to_data_idx[subc_idx]
+                syms_ordered.append(syms_data[data_idx])
+            syms_ordered = np.array(syms_ordered)
+            
+            # Пилот-символ (фаза 0) известен
+            pilot_phase = 0.0
+            
+            # Декодируем в порядке diff_order
+            if modulation == "DBPSK":
+                bits_sym = dbpsk_demap(syms_ordered, pilot_phase=pilot_phase)
+            else:  # DQPSK
+                bits_sym = dqpsk_demap(syms_ordered, pilot_phase=pilot_phase)
+            
+            bits_list.append(bits_sym)
+        
+        bits_pkt = np.concatenate(bits_list)
+        print(f"[RX-DIFF-DEMAP] Дифференциальный демаппинг: {n_ofdm_symbols} символов, "
+              f"bits_len={len(bits_pkt)}")
+    elif modulation in ("BPSK", "DBPSK"):
         bits_pkt = bpsk_demap(rx_syms_pkt)
     else:
         bits_pkt = qpsk_demap(rx_syms_pkt)
@@ -564,10 +607,10 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
     
     # Для первого пакета пробуем обе модуляции параллельно
     if packet_idx == 0:
-        print(f"[RX] First packet: trying both BPSK and QPSK modulation...")
+        print(f"[RX] First packet: trying DQPSK and DBPSK modulation...")
         results = []
         
-        for try_mod in ["QPSK", "BPSK"]:
+        for try_mod in ["DQPSK", "DBPSK"]:
             print(f"[RX] Trying {try_mod} modulation...")
             result = _try_decode_with_modulation(pref_abs, packet_blocks_expected, packet_idx, bytes_before_packet, expected_total, try_mod, show_waterfall=show_waterfall)
             if result is not None:
@@ -576,10 +619,31 @@ def decode_packet_at_candidate(pref_abs, packet_blocks_expected, packet_idx=0, b
                 results.append((decoded_blocks, rs_ok, used_pre, eq_instance, try_mod))
         
         if results:
-            # Выбираем лучший результат по количеству RS_OK
-            best = max(results, key=lambda x: x[1])
-            decoded_blocks, rs_ok, used_pre, eq_instance, best_mod = best
+            # Выбираем лучший результат: сначала проверяем валидность заголовка
+            # Если data_len > 0 и packet_blocks > 0, значит модуляция правильная
+            valid_results = []
+            for r in results:
+                decoded_blocks_r, rs_ok_r, used_pre_r, eq_instance_r, try_mod_r = r
+                # Проверяем первый блок на валидность заголовка
+                if len(decoded_blocks_r) > 0:
+                    header_bytes = b''.join([b for (b, ok) in decoded_blocks_r[:1]])
+                    if len(header_bytes) >= 52:
+                        data_len = int.from_bytes(header_bytes[2:10], 'big')
+                        packet_blocks = int.from_bytes(header_bytes[50:52], 'big')
+                        if data_len > 0 and packet_blocks > 0:
+                            valid_results.append(r)
+                            print(f"[RX] {try_mod_r}: valid header (data_len={data_len}, packet_blocks={packet_blocks})")
+                        else:
+                            print(f"[RX] {try_mod_r}: invalid header (data_len={data_len}, packet_blocks={packet_blocks})")
             
+            if valid_results:
+                # Среди валидных выбираем по RS_OK
+                best = max(valid_results, key=lambda x: x[1])
+            else:
+                # Если нет валидных, выбираем по RS_OK
+                best = max(results, key=lambda x: x[1])
+            
+            decoded_blocks, rs_ok, used_pre, eq_instance, best_mod = best
             print(f"[RX] Best modulation: {best_mod} with RS_OK={rs_ok}")
             
             # Устанавливаем глобальный эквалайзер от лучшей попытки (если включён)

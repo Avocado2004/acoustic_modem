@@ -20,29 +20,29 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 class TestModemConfig:
     """Тесты модуля конфигурации modem_config."""
     
-    def test_default_modulation_is_qpsk(self):
-        """Проверка что модуляция по умолчанию - QPSK."""
+    def test_default_modulation_is_dqpsk(self):
+        """Проверка что модуляция по умолчанию - DQPSK (дифференциальная)."""
         import modem_config
-        assert modem_config.MODULATION == "QPSK"
+        assert modem_config.MODULATION == "DQPSK"
     
-    def test_set_modulation_bpsk(self):
-        """Проверка переключения на BPSK."""
+    def test_set_modulation_dbpsk(self):
+        """Проверка переключения на DBPSK."""
         import modem_config
-        result = modem_config.set_modulation("BPSK")
+        result = modem_config.set_modulation("DBPSK")
         assert result is True
-        assert modem_config.MODULATION == "BPSK"
+        assert modem_config.MODULATION == "DBPSK"
         assert modem_config.BITS_PER_SYMBOL == 1
         assert modem_config.OFDM_SYMBOLS_PER_BLOCK == 2
-        # Восстанавливаем QPSK
-        modem_config.set_modulation("QPSK")
+        # Восстанавливаем DQPSK
+        modem_config.set_modulation("DQPSK")
     
-    def test_set_modulation_qpsk(self):
-        """Проверка переключения на QPSK."""
+    def test_set_modulation_dqpsk(self):
+        """Проверка переключения на DQPSK."""
         import modem_config
-        modem_config.set_modulation("BPSK")  # Сначала ставим BPSK
-        result = modem_config.set_modulation("QPSK")
+        modem_config.set_modulation("DBPSK")  # Сначала ставим DBPSK
+        result = modem_config.set_modulation("DQPSK")
         assert result is True
-        assert modem_config.MODULATION == "QPSK"
+        assert modem_config.MODULATION == "DQPSK"
         assert modem_config.BITS_PER_SYMBOL == 2
         assert modem_config.OFDM_SYMBOLS_PER_BLOCK == 1
     
@@ -125,13 +125,13 @@ class TestModemConfig:
         """Проверка что биты на OFDM символ считаются по DATA_SUBC_COUNT."""
         import modem_config
         # QPSK: 48 данных * 2 бита = 96 бит
-        modem_config.set_modulation("QPSK")
+        modem_config.set_modulation("DQPSK")
         assert modem_config.BITS_PER_OFDM_SYMBOL == 96
-        # BPSK: 48 данных * 1 бит = 48 бит
-        modem_config.set_modulation("BPSK")
+        # DBPSK: 48 данных * 1 бит = 48 бит
+        modem_config.set_modulation("DBPSK")
         assert modem_config.BITS_PER_OFDM_SYMBOL == 48
-        # Восстанавливаем QPSK
-        modem_config.set_modulation("QPSK")
+        # Восстанавливаем DQPSK
+        modem_config.set_modulation("DQPSK")
 
 
 # =============================================================================
@@ -632,28 +632,28 @@ class TestConstants:
 class TestOFDMWithPilotSubcarrier:
     """Тесты OFDM символов и преамбулы с пилот-поднесущей."""
     
-    def test_ofdm_symbol_data_pilot_qpsk(self):
-        """Проверка что в данных QPSK пилот-поднесущая = символ '00'."""
+    def test_ofdm_symbol_data_pilot_dqpsk(self):
+        """Проверка что в данных DQPSK пилот-поднесущая = символ с фазой 0 (1+0j)."""
         import modem_config
         from modem_modulation import ofdm_symbol
-        modem_config.set_modulation("QPSK")
+        modem_config.set_modulation("DQPSK")
         # Создаём символ с 49 поднесущими
         data_syms = np.ones(modem_config.Nsub, dtype=complex)
         td, fd = ofdm_symbol(data_syms, return_fd=True, is_preamble=False)
         pilot_idx = modem_config.PILOT_SUBC_INDEX
-        # Пилот-поднесущая должна быть (1+1j)/√2 после нормализации
+        # Пилот-поднесущая должна быть 1+0j (фаза 0) для DQPSK
         pilot_val = fd[pilot_idx]
         expected = (1 + 1j) / np.sqrt(2)
         # После нормализации амплитуда должна быть близка к 1
         assert abs(abs(pilot_val) - 1.0) < 0.1, f"Pilot magnitude {abs(pilot_val)} != 1.0"
-        # Фаза должна быть π/4 (45°)
-        assert abs(np.angle(pilot_val) - np.pi/4) < 0.1, f"Pilot phase {np.angle(pilot_val)} != π/4"
+        # Фаза должна быть 0 (для DQPSK пилот = 1+0j)
+        assert abs(np.angle(pilot_val)) < 0.1, f"Pilot phase {np.angle(pilot_val)} != 0"
     
     def test_ofdm_symbol_data_pilot_bpsk(self):
         """Проверка что в данных BPSK пилот-поднесущая = символ '0' (+1)."""
         import modem_config
         from modem_modulation import ofdm_symbol
-        modem_config.set_modulation("BPSK")
+        modem_config.set_modulation("DBPSK")
         data_syms = np.ones(modem_config.Nsub, dtype=complex)
         td, fd = ofdm_symbol(data_syms, return_fd=True, is_preamble=False)
         pilot_idx = modem_config.PILOT_SUBC_INDEX
@@ -661,8 +661,8 @@ class TestOFDMWithPilotSubcarrier:
         # BPSK символ "0" = +1 (действительное положительное число)
         assert pilot_val.real > 0.5, f"BPSK pilot real part {pilot_val.real} should be > 0.5"
         assert abs(pilot_val.imag) < 0.1, f"BPSK pilot imag part {pilot_val.imag} should be ~0"
-        # Восстанавливаем QPSK
-        modem_config.set_modulation("QPSK")
+        # Восстанавливаем DQPSK
+        modem_config.set_modulation("DQPSK")
     
     def test_ofdm_symbol_preamble_pilot_is_zero(self):
         """Проверка что в преамбуле пилот-поднесущая = 0 (тишина)."""
@@ -715,7 +715,7 @@ class TestOFDMWithPilotSubcarrier:
         from modem_modulation import build_data_td, bytes_to_bits
         # Генерируем тестовые биты (96 бит = 1 RS слово для QPSK)
         test_bits = np.array([0, 1] * 48)
-        modem_config.set_modulation("QPSK")
+        modem_config.set_modulation("DQPSK")
         td, n_symbols, fd_symbols = build_data_td(test_bits, collect_fd=True)
         # Должен быть 1 OFDM символ (96 бит / 48 поднесущих * 2 бита = 1)
         assert n_symbols == 1
@@ -726,8 +726,8 @@ class TestOFDMWithPilotSubcarrier:
         pilot_idx = modem_config.PILOT_SUBC_INDEX
         pilot_val = fd_array[0, pilot_idx]
         assert abs(pilot_val) > 0.1, f"Pilot should have non-zero value in data"
-        # Восстанавливаем QPSK
-        modem_config.set_modulation("QPSK")
+        # Восстанавливаем DQPSK
+        modem_config.set_modulation("DQPSK")
     
     def test_frequency_range_with_49_subcarriers(self):
         """Проверка частотного диапазона с 49 поднесущими."""

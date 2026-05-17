@@ -1,6 +1,6 @@
 """
 Модуль модуляции и демодуляции OFDM Acoustic Modem.
-Содержит функции для работы с битами, QPSK/BPSK, OFDM символами и ACE.
+Содержит функции для работы с битами, QPSK/BPSK/DQPSK/DBPSK, OFDM символами и ACE.
 """
 
 import os
@@ -9,11 +9,14 @@ import struct
 import zlib
 import modem_config
 from modem_config import (Nfft, Ncp, Nsub, subc_inds, fs, PHASE_METHOD,
-                          BITS_PER_SYMBOL,
+                          BITS_PER_SYMBOL, IS_DIFFERENTIAL,
                           BITS_PER_OFDM_SYMBOL, RS_DATA_BYTES, RS_CW_BYTES, RS_CW_BITS, rs,
                           SYMBOL_TX_TARGET, ACE_MAX_ITERS, ACE_PEAK_THRESHOLD, ACE_STEP, ACE_ALLOW_EXPANSION,
                           make_subcarrier_phases, HABR_SAMPLE_BLOCKS, HABR_SEED, HABR_MAX_ITERS,
                           HABR_PHASE_GRID, HABR_SAVE_FILE)
+
+# Импорт функций дифференциальной модуляции
+from modem_differential import (dqpsk_map, dqpsk_demap, dbpsk_map, dbpsk_demap, get_diff_order)
 
 # -----------------------
 # Биты/текст/битовые утилиты
@@ -270,14 +273,15 @@ def ofdm_symbol(data_syms, return_fd=False, is_preamble=False):
     if is_preamble:
         # В преамбуле пилот-поднесущая = 0 (тишина)
         ds[pilot_idx] = 0.0 + 0.0j
-    else:
-        # В данных пилот-поднесущая = символ "0"
+    elif not modem_config.IS_DIFFERENTIAL:
+        # В данных пилот-поднесущая = символ "0" (только для когерентной модуляции)
         # Для QPSK: "00" → (1+1j)/√2
         # Для BPSK: "0" → +1
         if modem_config.MODULATION == "BPSK":
             ds[pilot_idx] = 1.0 + 0.0j  # BPSK символ "0"
         else:
             ds[pilot_idx] = (1.0 + 1.0j) / np.sqrt(2)  # QPSK символ "00"
+    # Для DQPSK/DBPSK пилот уже установлен в build_data_td как 1+0j (фаза 0)
 
     try:
         eps = 1e-12
@@ -366,20 +370,31 @@ def build_data_td(bits, collect_fd=False):
     """
     Сборка модулированных данных во временную область.
     
-    Алгоритм:
-    1. Преобразование битов в символы модуляции (BPSK или QPSK)
+    Алгоритм для когерентной модуляции (QPSK/BPSK):
+    1. Преобразование битов в символы модуляции
     2. Дополнение нулями до кратности DATA_SUBC_COUNT (48 поднесущих данных)
     3. Разбиение на блоки по DATA_SUBC_COUNT символов
     4. Добавление пилот-поднесущей (символ "0") в позицию PILOT_SUBC_INDEX
     5. Преобразование каждого блока в OFDM символ во временной области
     
+    Алгоритм для дифференциальной модуляции (DQPSK/DBPSK):
+    1. Преобразование битов в символы модуляции
+    2. Дополнение нулями до кратности DATA_SUBC_COUNT (48 поднесущих данных)
+    3. Разбиение на блоки по DATA_SUBC_COUNT символов
+    4. Дифференциальное кодирование от пилота к краям:
+       - Пилот-поднесущая (индекс 24) = 1+0j (фаза 0)
+       - Порядок кодирования: 23 → 25 → 22 → 26 → ... → 0 → 48
+       - Каждый следующий символ кодируется относительно предыдущего
+    5. Преобразование каждого блока в OFDM символ во временной области
+    
     Важно: данные размещаются только на 48 поднесущих (DATA_SUBC_COUNT).
     Поднесущая с индексом PILOT_SUBC_INDEX автоматически заполняется
-    символом "0" в ofdm_symbol().
+    символом "0" в ofdm_symbol() для когерентной модуляции.
+    Для дифференциальной модуляции пилот устанавливается здесь как 1+0j.
     
-    Особенности для BPSK:
+    Особенности для BPSK/DBPSK:
     - 48 поднесущих данных × 1 бит = 48 бит/OFDM символ
-    - Для формирования одного RS слова (96 бит) требуется 2 OFDM символа BPSK
+    - Для формирования одного RS слова (96 бит) требуется 2 OFDM символа
     
     Параметры
     ----------
@@ -399,32 +414,70 @@ def build_data_td(bits, collect_fd=False):
     fd_symbols : ndarray (только если collect_fd=True)
         Плоский массив комплексных поднесущих всех OFDM символов
     """
-    if modem_config.MODULATION == "BPSK":
-        syms = bpsk_map(bits)
-    else:
-        syms = qpsk_map(bits)
-    
-    # Дополняем до кратности DATA_SUBC_COUNT (48), не Nsub (49)
-    data_subc = modem_config.DATA_SUBC_COUNT
-    pad = (-len(syms)) % data_subc
-    if pad:
-        syms = np.concatenate((syms, np.zeros(pad, dtype=complex)))
-    
-    # Разбиваем на блоки по DATA_SUBC_COUNT символов
-    blk_data = syms.reshape(-1, data_subc)
-    
-    # Добавляем пилот-поднесущую в каждый блок
-    # Пилот-поднесущая всегда = символ "0" (будет установлена в ofdm_symbol)
     pilot_idx = modem_config.PILOT_SUBC_INDEX
-    blk_full = np.zeros((blk_data.shape[0], Nsub), dtype=complex)
-    for i in range(blk_data.shape[0]):
-        # Вставляем данные, пропуская позицию пилот-поднесущей
-        data_idx = 0
-        for j in range(Nsub):
-            if j == pilot_idx:
-                continue  # Пилот-поднесущая заполнится в ofdm_symbol()
-            blk_full[i, j] = blk_data[i, data_idx]
-            data_idx += 1
+    data_subc = modem_config.DATA_SUBC_COUNT
+    
+    # Выбор функции маппинга в зависимости от модуляции
+    if modem_config.IS_DIFFERENTIAL:
+        # Дифференциальная модуляция
+        if modem_config.MODULATION == "DBPSK":
+            diff_map_func = dbpsk_map
+        else:
+            diff_map_func = dqpsk_map
+        
+        # Маппинг битов в символы
+        syms = diff_map_func(bits)
+        
+        # Дополняем до кратности DATA_SUBC_COUNT (48)
+        pad = (-len(syms)) % data_subc
+        if pad:
+            syms = np.concatenate((syms, np.zeros(pad, dtype=complex)))
+        
+        # Разбиваем на блоки по DATA_SUBC_COUNT символов
+        blk_data = syms.reshape(-1, data_subc)
+        
+        # Получаем порядок поднесущих для дифференциального кодирования
+        diff_order = get_diff_order()
+        
+        # Создаем полные блоки с пилот-поднесущей
+        blk_full = np.zeros((blk_data.shape[0], Nsub), dtype=complex)
+        
+        for i in range(blk_data.shape[0]):
+            # Устанавливаем пилот-поднесущую (фаза 0)
+            blk_full[i, pilot_idx] = 1.0 + 0.0j
+            
+            # Размещаем данные в порядке от пилота к краям
+            for data_idx, subc_idx in enumerate(diff_order):
+                if data_idx < len(blk_data[i]):
+                    blk_full[i, subc_idx] = blk_data[i, data_idx]
+        
+        print(f"[BUILD-DIFF] Дифференциальное кодирование: {blk_data.shape[0]} блоков, "
+              f"pilot_idx={pilot_idx}, diff_order={diff_order[:5]}...")
+    else:
+        # Когерентная модуляция (QPSK/BPSK)
+        if modem_config.MODULATION == "BPSK":
+            syms = bpsk_map(bits)
+        else:
+            syms = qpsk_map(bits)
+        
+        # Дополняем до кратности DATA_SUBC_COUNT (48)
+        pad = (-len(syms)) % data_subc
+        if pad:
+            syms = np.concatenate((syms, np.zeros(pad, dtype=complex)))
+        
+        # Разбиваем на блоки по DATA_SUBC_COUNT символов
+        blk_data = syms.reshape(-1, data_subc)
+        
+        # Добавляем пилот-поднесущую в каждый блок
+        blk_full = np.zeros((blk_data.shape[0], Nsub), dtype=complex)
+        for i in range(blk_data.shape[0]):
+            # Вставляем данные, пропуская позицию пилот-поднесущей
+            data_idx = 0
+            for j in range(Nsub):
+                if j == pilot_idx:
+                    continue  # Пилот-поднесущая заполнится в ofdm_symbol()
+                blk_full[i, j] = blk_data[i, data_idx]
+                data_idx += 1
     
     if collect_fd:
         # Собираем FD символы для созвездия
